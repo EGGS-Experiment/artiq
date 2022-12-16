@@ -295,7 +295,9 @@ def main():
             f["run_time"] = run_time
             f["expid"] = pyon.encode(expid)
 
+
     from LAX_exp.extensions import write_results_lax
+
 
     device_mgr = DeviceManager(ParentDeviceDB,
                                virtual_devices={"scheduler": Scheduler(),
@@ -360,7 +362,14 @@ def main():
                         write_results()
 
                         # also write results in LAX format
-                        write_results_lax(exp_inst)
+                        exp_params = {
+                            "artiq_version": artiq_version,
+                            "rid": rid,
+                            "start_time": start_time,
+                            "run_time": run_time,
+                            "expid": pyon.encode(expid)
+                        }
+                        write_results_lax(exp_inst, exp_params)
             elif action == "examine":
                 examine(ExamineDeviceMgr, ExamineDatasetMgr, obj["file"])
                 put_completed()
