@@ -37,3 +37,6 @@ __pycache__/
 .idea
 **/.idea
 .idea/**
+
+# OSX
+**/.DS_Store

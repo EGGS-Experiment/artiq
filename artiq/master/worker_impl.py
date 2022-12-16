@@ -295,6 +295,8 @@ def main():
             f["run_time"] = run_time
             f["expid"] = pyon.encode(expid)
 
+    from LAX_exp.extensions import write_results_lax
+
     device_mgr = DeviceManager(ParentDeviceDB,
                                virtual_devices={"scheduler": Scheduler(),
                                                 "ccb": CCB()})
@@ -356,6 +358,9 @@ def main():
                     # since it doesn't run the experiment and cannot have rid
                     if rid is not None:
                         write_results()
+
+                        # also write results in LAX format
+                        write_results_lax(exp_inst)
             elif action == "examine":
                 examine(ExamineDeviceMgr, ExamineDatasetMgr, obj["file"])
                 put_completed()
