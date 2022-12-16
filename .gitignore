@@ -32,3 +32,8 @@ __pycache__/
 /dataset_db.pyon
 /device_db*.py
 /test*
+
+# all of .idea (pycharm's config files)
+.idea
+**/.idea
+.idea/**
