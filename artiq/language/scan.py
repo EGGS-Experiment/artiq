@@ -27,7 +27,7 @@ from artiq.language import units
 
 
 __all__ = ["ScanObject",
-           "NoScan", "RangeScan", "CenterScan", "ExplicitScan",
+           "NoScan", "RangeScan", "CenterScan", "LinearScan", "ExplicitScan",
            "Scannable", "MultiScanManager"]
 
 
@@ -137,6 +137,43 @@ class CenterScan(ScanObject):
                 "seed": self.seed}
 
 
+class LinearScan(ScanObject):
+    """A scan object that yields evenly spaced values within a range defined
+    by a start and stop value. ``start`` is always included. Values larger
+    than ``stop`` are never included. If ``randomize`` is True
+    the points are randomly ordered."""
+    def __init__(self, start, stop, step, randomize=False, seed=None):
+        self.start = start
+        self.stop = stop
+        self.step = step
+        self.randomize = randomize
+        self.seed = seed
+
+        if step == 0.:
+            self.sequence = []
+        else:
+            n = 1 + int((stop - start) / (step))
+            self.sequence = [start + i * step for i in range(n)]
+
+
+        if randomize:
+            rng = random.Random(seed)
+            random.shuffle(self.sequence, rng.random)
+
+    def __iter__(self):
+        return iter(self.sequence)
+
+    def __len__(self):
+        return len(self.sequence)
+
+    def describe(self):
+        return {"ty": "LinearScan",
+                "start": self.start, "step": self.step,
+                "stop": self.stop,
+                "randomize": self.randomize,
+                "seed": self.seed}
+
+
 class ExplicitScan(ScanObject):
     """A scan object that yields values from an explicitly defined sequence."""
     def __init__(self, sequence):
@@ -156,6 +193,7 @@ _ty_to_scan = {
     "NoScan": NoScan,
     "RangeScan": RangeScan,
     "CenterScan": CenterScan,
+    "LinearScan": LinearScan,
     "ExplicitScan": ExplicitScan
 }
 

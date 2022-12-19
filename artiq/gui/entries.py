@@ -357,6 +357,77 @@ class _CenterScan(LayoutWidget):
         step.valueChanged.connect(update_step)
         randomize.stateChanged.connect(update_randomize)
 
+class _LinearScan(LayoutWidget):
+    def __init__(self, procdesc, state):
+        LayoutWidget.__init__(self)
+
+        scale = procdesc["scale"]
+
+        def apply_properties(widget):
+            widget.setDecimals(procdesc["ndecimals"])
+            if procdesc["global_min"] is not None:
+                widget.setMinimum(procdesc["global_min"]/scale)
+            else:
+                widget.setMinimum(float("-inf"))
+            if procdesc["global_max"] is not None:
+                widget.setMaximum(procdesc["global_max"]/scale)
+            else:
+                widget.setMaximum(float("inf"))
+            if procdesc["global_step"] is not None:
+                widget.setSingleStep(procdesc["global_step"]/scale)
+            if procdesc["unit"]:
+                widget.setSuffix(" " + procdesc["unit"])
+
+        start = ScientificSpinBox()
+        disable_scroll_wheel(start)
+        apply_properties(start)
+        start.setPrecision()
+        start.setRelativeStep()
+        start.setValue(state["start"]/scale)
+        self.addWidget(start, 0, 1)
+        self.addWidget(QtWidgets.QLabel("Start:"), 0, 0)
+
+        stop = ScientificSpinBox()
+        disable_scroll_wheel(stop)
+        apply_properties(stop)
+        stop.setPrecision()
+        stop.setRelativeStep()
+        stop.setMinimum(0)
+        stop.setValue(state["stop"]/scale)
+        self.addWidget(stop, 1, 1)
+        self.addWidget(QtWidgets.QLabel("Stop:"), 1, 0)
+
+        step = ScientificSpinBox()
+        disable_scroll_wheel(step)
+        apply_properties(step)
+        step.setPrecision()
+        step.setRelativeStep()
+        step.setMinimum(0)
+        step.setValue(state["step"]/scale)
+        self.addWidget(step, 2, 1)
+        self.addWidget(QtWidgets.QLabel("Step:"), 2, 0)
+
+        randomize = QtWidgets.QCheckBox("Randomize")
+        self.addWidget(randomize, 3, 1)
+        randomize.setChecked(state["randomize"])
+
+        def update_start(value):
+            state["start"] = value*scale
+
+        def update_stop(value):
+            state["stop"] = value*scale
+
+        def update_step(value):
+            state["step"] = value*scale
+
+        def update_randomize(value):
+            state["randomize"] = value
+
+        start.valueChanged.connect(update_start)
+        stop.valueChanged.connect(update_stop)
+        step.valueChanged.connect(update_step)
+        randomize.stateChanged.connect(update_randomize)
+
 
 class _ExplicitScan(LayoutWidget):
     def __init__(self, state):
@@ -391,6 +462,7 @@ class ScanEntry(LayoutWidget):
         self.widgets["NoScan"] = _NoScan(procdesc, state["NoScan"])
         self.widgets["RangeScan"] = _RangeScan(procdesc, state["RangeScan"])
         self.widgets["CenterScan"] = _CenterScan(procdesc, state["CenterScan"])
+        self.widgets["LinearScan"] = _LinearScan(procdesc, state["LinearScan"])
         self.widgets["ExplicitScan"] = _ExplicitScan(state["ExplicitScan"])
         for widget in self.widgets.values():
             self.stack.addWidget(widget)
@@ -399,6 +471,7 @@ class ScanEntry(LayoutWidget):
         self.radiobuttons["NoScan"] = QtWidgets.QRadioButton("No scan")
         self.radiobuttons["RangeScan"] = QtWidgets.QRadioButton("Range")
         self.radiobuttons["CenterScan"] = QtWidgets.QRadioButton("Center")
+        self.radiobuttons["LinearScan"] = QtWidgets.QRadioButton("Linear")
         self.radiobuttons["ExplicitScan"] = QtWidgets.QRadioButton("Explicit")
         scan_type = QtWidgets.QButtonGroup()
         for n, b in enumerate(self.radiobuttons.values()):
@@ -431,6 +504,9 @@ class ScanEntry(LayoutWidget):
             "CenterScan": {"center": 0.*scale, "span": 100.*scale,
                            "step": 10.*scale, "randomize": False,
                            "seed": None},
+            "LinearScan": {"start": 0. * scale, "stop": 100. * scale,
+                           "step": 10. * scale, "randomize": False,
+                           "seed": None},
             "ExplicitScan": {"sequence": []}
         }
         if "default" in procdesc:
@@ -451,6 +527,9 @@ class ScanEntry(LayoutWidget):
                     state[ty]["seed"] = default["seed"]
                 elif ty == "CenterScan":
                     for key in "center span step randomize seed".split():
+                        state[ty][key] = default[key]
+                elif ty == "LinearScan":
+                    for key in "start stop step randomize seed".split():
                         state[ty][key] = default[key]
                 elif ty == "ExplicitScan":
                     state[ty]["sequence"] = default["sequence"]
