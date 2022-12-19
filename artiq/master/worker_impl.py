@@ -296,9 +296,6 @@ def main():
             f["expid"] = pyon.encode(expid)
 
 
-    from LAX_exp.extensions import write_results_lax
-
-
     device_mgr = DeviceManager(ParentDeviceDB,
                                virtual_devices={"scheduler": Scheduler(),
                                                 "ccb": CCB()})
@@ -361,15 +358,20 @@ def main():
                     if rid is not None:
                         write_results()
 
-                        # also write results in LAX format
-                        exp_params = {
-                            "artiq_version": artiq_version,
-                            "rid": rid,
-                            "start_time": start_time,
-                            "run_time": run_time,
-                            "expid": pyon.encode(expid)
-                        }
-                        write_results_lax(exp_inst, exp_params)
+                        # also try to call experiment specific write_results
+                        if hasattr(exp_inst, 'write_results'):
+                            try:
+                                exp_params = {
+                                    "artiq_version": artiq_version,
+                                    "rid": rid,
+                                    "start_time": start_time,
+                                    "run_time": run_time,
+                                    "expid": pyon.encode(expid)
+                                }
+                                exp_inst.write_results(exp_params)
+                            except Exception as e:
+                                pass
+
             elif action == "examine":
                 examine(ExamineDeviceMgr, ExamineDatasetMgr, obj["file"])
                 put_completed()
