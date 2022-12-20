@@ -295,6 +295,29 @@ def main():
             f["run_time"] = run_time
             f["expid"] = pyon.encode(expid)
 
+    # tmp remove
+    def write_results_motion():
+        dirname = os.path.join(
+            "Z:",
+            "motion",
+            "data",
+            time.strftime("%Y-%m-%d", start_local_time)
+        )
+
+        os.makedirs(dirname, exist_ok=True)
+        os.chdir(dirname)
+        filename = "{:09}-{}.h5".format(rid, exp.__name__)
+
+        with h5py.File(filename, "w") as f:
+            dataset_mgr.write_hdf5(f)
+            f["artiq_version"] = artiq_version
+            f["rid"] = rid
+            f["start_time"] = start_time
+            f["run_time"] = run_time
+            f["expid"] = pyon.encode(expid)
+    # tmp remvoe
+
+
 
     device_mgr = DeviceManager(ParentDeviceDB,
                                virtual_devices={"scheduler": Scheduler(),
@@ -371,6 +394,9 @@ def main():
                                 exp_inst.write_results(exp_params)
                             except Exception as e:
                                 pass
+                        else:
+                            write_results_motion()
+
 
             elif action == "examine":
                 examine(ExamineDeviceMgr, ExamineDatasetMgr, obj["file"])
