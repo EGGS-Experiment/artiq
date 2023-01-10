@@ -382,11 +382,12 @@ def main():
                         if hasattr(exp_inst, 'write_results'):
                             try:
                                 exp_params = {
-                                    "artiq_version": artiq_version,
-                                    "rid": rid,
-                                    "start_time": start_time,
-                                    "run_time": run_time,
-                                    "expid": pyon.encode(expid)
+                                    "artiq_version":    artiq_version,
+                                    "rid":              rid,
+                                    "start_time":       start_time,
+                                    "run_time":         run_time,
+                                    "repo_rev":         expid.get("repo_rev", None),
+                                    "expid":            pyon.encode(expid)
                                 }
                                 exp_inst.write_results(exp_params)
                             except Exception as e:
