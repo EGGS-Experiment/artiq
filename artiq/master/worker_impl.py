@@ -295,7 +295,6 @@ def main():
             f["run_time"] = run_time
             f["expid"] = pyon.encode(expid)
 
-    # tmp remove
     def write_results_motion():
         dirname = os.path.join(
             "Z:",
@@ -315,8 +314,6 @@ def main():
             f["start_time"] = start_time
             f["run_time"] = run_time
             f["expid"] = pyon.encode(expid)
-    # tmp remvoe
-
 
 
     device_mgr = DeviceManager(ParentDeviceDB,

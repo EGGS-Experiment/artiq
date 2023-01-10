@@ -601,6 +601,7 @@ class MultiScanEntry(LayoutWidget):
         pass
 
     def _removeScan(self):
+        pass
 
     def disable(self):
         self.radiobuttons["NoScan"].setChecked(True)
@@ -674,6 +675,6 @@ def procdesc_to_entry(procdesc):
             "BooleanValue": BooleanEntry,
             "EnumerationValue": EnumerationEntry,
             "StringValue": StringEntry,
-            "Scannable": ScanEntry,
-            "MultiScannable": MultiScanEntry
+            "Scannable": ScanEntry
+            #"MultiScannable": MultiScanEntry
         }[ty]
