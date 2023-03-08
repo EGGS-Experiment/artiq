@@ -37,10 +37,12 @@ class _Model(QtCore.QAbstractItemModel):
         self.white = QtGui.QBrush(QtGui.QColor(255, 255, 255))
         self.black = QtGui.QBrush(QtGui.QColor(0, 0, 0))
         self.debug_fg = QtGui.QBrush(QtGui.QColor(55, 55, 55))
-        self.warning_bg = QtGui.QBrush(QtGui.QColor(255, 255, 180))
-        self.error_bg = QtGui.QBrush(QtGui.QColor(255, 150, 150))
+        # self.warning_bg = QtGui.QBrush(QtGui.QColor(255, 255, 180))
+        # self.error_bg = QtGui.QBrush(QtGui.QColor(255, 150, 150))
 
         # tmp remove - darkmode
+        self.warning_bg = QtGui.QBrush(QtGui.QColor(90, 80, 180))
+        self.error_bg = QtGui.QBrush(QtGui.QColor(50, 80, 40))
         self.lightGray = QtGui.QBrush(QtCore.Qt.lightGray)
         # tmp remove - darkmode
 
