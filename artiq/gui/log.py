@@ -40,6 +40,11 @@ class _Model(QtCore.QAbstractItemModel):
         self.warning_bg = QtGui.QBrush(QtGui.QColor(255, 255, 180))
         self.error_bg = QtGui.QBrush(QtGui.QColor(255, 150, 150))
 
+        # tmp remove - darkmode
+        self.lightGray = QtGui.QBrush(QtCore.Qt.lightGray)
+        # tmp remove - darkmode
+
+
     def headerData(self, col, orientation, role):
         if (orientation == QtCore.Qt.Horizontal
                 and role == QtCore.Qt.DisplayRole):
@@ -139,13 +144,22 @@ class _Model(QtCore.QAbstractItemModel):
             elif level >= logging.WARNING:
                 return self.warning_bg
             else:
-                return self.white
+                # return self.white
+
+                # tmp remove - darkmode
+                return self.black
+                # tmp remove - darkmode
+
         elif role == QtCore.Qt.ForegroundRole:
             level = self.entries[msgnum][0]
             if level <= logging.DEBUG:
                 return self.debug_fg
             else:
-                return self.black
+                # return self.black
+
+                # tmp remove - darkmode
+                return self.lightGray
+                # tmp remove - darkmode
         elif role == QtCore.Qt.DisplayRole:
             v = self.entries[msgnum]
             column = index.column()

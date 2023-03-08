@@ -52,8 +52,10 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         self.setHorizontalScrollMode(self.ScrollPerPixel)
         self.setVerticalScrollMode(self.ScrollPerPixel)
 
+        # tmp remove - darkmode
         self.setStyleSheet("QTreeWidget {background: " +
-                           self.palette().midlight().color().name() + " ;}")
+                           self.palette().shadow().color().name() + " ;}")
+        # tmp remove - darkmode
 
         self.viewport().installEventFilter(_WheelFilter(self.viewport()))
 
@@ -67,8 +69,14 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
 
         gradient = QtGui.QLinearGradient(
             0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()*2.5)
-        gradient.setColorAt(0, self.palette().base().color())
-        gradient.setColorAt(1, self.palette().midlight().color())
+        # gradient.setColorAt(0, self.palette().base().color())
+        # gradient.setColorAt(1, self.palette().midlight().color())
+
+        # tmp remove - darkmode
+        gradient.setColorAt(0, self.palette().dark().color())
+        gradient.setColorAt(1, self.palette().shadow().color())
+        # tmp remove - darkmode
+
         for name, argument in arguments.items():
             widgets = dict()
             self._arg_to_widgets[name] = widgets
