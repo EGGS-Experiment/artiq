@@ -376,6 +376,8 @@ def main():
                     # browser's analyze shouldn't write results,
                     # since it doesn't run the experiment and cannot have rid
                     if rid is not None:
+
+                        # always save results to base location as a safeguard
                         write_results()
 
                         # also try to call experiment specific write_results
@@ -386,7 +388,7 @@ def main():
                                     "rid":              rid,
                                     "start_time":       start_time,
                                     "run_time":         run_time,
-                                    "repo_rev":         expid.get("repo_rev", None),
+                                    "repo_rev":         expid.get("repo_rev", ""),
                                     "expid":            pyon.encode(expid)
                                 }
                                 exp_inst.write_results(exp_params)
