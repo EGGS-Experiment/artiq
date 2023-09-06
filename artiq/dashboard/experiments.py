@@ -53,8 +53,11 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         self.setVerticalScrollMode(self.ScrollPerPixel)
 
         # tmp remove - darkmode
-        self.setStyleSheet("QTreeWidget {background: " +
-                           self.palette().shadow().color().name() + " ;}")
+        self.setStyleSheet('''
+            QTreeWidget {{background: {:s} ;}}
+            QWidget {{font-size: {:f}pt;}}
+        '''.format('#484848', 12.5))
+        # '''.format(self.palette().shadow().color().name() ))
         # tmp remove - darkmode
 
         self.viewport().installEventFilter(_WheelFilter(self.viewport()))
@@ -69,13 +72,20 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
 
         gradient = QtGui.QLinearGradient(
             0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()*2.5)
+
+
+        # tmp remove - darkmode
+        # sets the color gradient for argument boxes in the experiment widgets
         # gradient.setColorAt(0, self.palette().base().color())
         # gradient.setColorAt(1, self.palette().midlight().color())
 
+        # gradient.setColorAt(0, self.palette().dark().color())
+        # gradient.setColorAt(1, self.palette().shadow().color())
+
+        gradient.setColorAt(0, self.palette().shadow().color())
+        gradient.setColorAt(1, QtGui.QColor(39, 39, 39))
         # tmp remove - darkmode
-        gradient.setColorAt(0, self.palette().dark().color())
-        gradient.setColorAt(1, self.palette().shadow().color())
-        # tmp remove - darkmode
+
 
         for name, argument in arguments.items():
             widgets = dict()
@@ -472,6 +482,7 @@ class _ExperimentDock(QtWidgets.QMdiSubWindow):
             with h5py.File(filename, "r") as f:
                 expid = f["expid"][()]
             expid = pyon.decode(expid)
+            print(expid)
             arguments = expid["arguments"]
         except:
             logger.error("Could not retrieve expid from HDF5 file",

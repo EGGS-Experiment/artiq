@@ -120,25 +120,34 @@ def main():
     from PyQt5.QtCore import Qt
     from PyQt5.QtGui import QColor, QPalette
     palette = QtGui.QPalette()
+
     # palette.setColor(QPalette.Window,               QColor(53, 53, 53))
     palette.setColor(QPalette.Window,               Qt.darkGray)
+
     # palette.setColor(QPalette.WindowText,           Qt.white)
     palette.setColor(QPalette.WindowText,           Qt.lightGray)
+
     palette.setColor(QPalette.Base,                 QColor(25, 25, 25))
     palette.setColor(QPalette.AlternateBase,        QColor(53, 53, 53))
+
     palette.setColor(QPalette.ToolTipBase,          Qt.black)
     # palette.setColor(QPalette.ToolTipText,          Qt.white)
+
     palette.setColor(QPalette.ToolTipText,          Qt.lightGray)
     # palette.setColor(QPalette.Text,                 Qt.white)
+
     palette.setColor(QPalette.Text,                 Qt.lightGray)
+
     palette.setColor(QPalette.Button,               QColor(53, 53, 53))
     # palette.setColor(QPalette.ButtonText,           Qt.white)
+
     palette.setColor(QPalette.ButtonText,           Qt.lightGray)
     palette.setColor(QPalette.BrightText,           Qt.red)
     palette.setColor(QPalette.Link,                 QColor(42, 130, 218))
     palette.setColor(QPalette.Highlight,            QColor(42, 130, 218))
     palette.setColor(QPalette.HighlightedText,      Qt.black)
     app.setPalette(palette)
+    # tmp remove darkmode
 
     # create connections to master
     rpc_clients = dict()
