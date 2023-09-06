@@ -53,10 +53,20 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         self.setVerticalScrollMode(self.ScrollPerPixel)
 
         # tmp remove - darkmode
+        darkmode_options = {
+            'exp_window_bgr_col':   '#484848',
+            'all_font_size'     :   12.5,
+            'arg_font_col'      :   'black'
+        }
+        #
         self.setStyleSheet('''
-            QTreeWidget {{background: {:s} ;}}
-            QWidget {{font-size: {:f}pt;}}
-        '''.format('#484848', 12.5))
+            QTreeWidget {{background: {exp_window_bgr_col:s};}}
+            QTreeWidgetItem {{color: {arg_font_col:s};}}
+            QWidget {{font - size: {all_font_size:f}pt}}
+            QLineEdit {{color: {arg_font_col:s};}}
+            QSpinBox {{color: {arg_font_col:s};}}
+            QDoubleSpinBox {{color: {arg_font_col:s};}}
+        '''.format(**darkmode_options))
         # '''.format(self.palette().shadow().color().name() ))
         # tmp remove - darkmode
 

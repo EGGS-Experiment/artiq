@@ -131,22 +131,25 @@ def main():
     palette.setColor(QPalette.AlternateBase,        QColor(53, 53, 53))
 
     palette.setColor(QPalette.ToolTipBase,          Qt.black)
+
     # palette.setColor(QPalette.ToolTipText,          Qt.white)
-
     palette.setColor(QPalette.ToolTipText,          Qt.lightGray)
-    # palette.setColor(QPalette.Text,                 Qt.white)
 
+    # palette.setColor(QPalette.Text,                 Qt.white)
     palette.setColor(QPalette.Text,                 Qt.lightGray)
 
     palette.setColor(QPalette.Button,               QColor(53, 53, 53))
-    # palette.setColor(QPalette.ButtonText,           Qt.white)
 
+    # palette.setColor(QPalette.ButtonText,           Qt.white)
     palette.setColor(QPalette.ButtonText,           Qt.lightGray)
+
     palette.setColor(QPalette.BrightText,           Qt.red)
     palette.setColor(QPalette.Link,                 QColor(42, 130, 218))
     palette.setColor(QPalette.Highlight,            QColor(42, 130, 218))
     palette.setColor(QPalette.HighlightedText,      Qt.black)
     app.setPalette(palette)
+
+    app.setStyleSheet("QWidget {{font-size: {:f}pt;}}".format(12))
     # tmp remove darkmode
 
     # create connections to master
