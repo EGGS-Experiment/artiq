@@ -33,6 +33,7 @@ class _Model(QtCore.QAbstractItemModel):
         timer.start(100)
 
         self.fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
+        self.fixed_font.setPointSize(12)
 
         self.white = QtGui.QBrush(QtGui.QColor(255, 255, 255))
         self.black = QtGui.QBrush(QtGui.QColor(0, 0, 0))
