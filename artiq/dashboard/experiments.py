@@ -55,17 +55,18 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         # tmp remove - darkmode
         darkmode_options = {
             'exp_window_bgr_col':   '#484848',
-            'all_font_size'     :   12.5,
-            'arg_font_col'      :   'black'
+            'all_font_size':        12.5,
+            'arg_font_col':         'black',
+            'text_bgr_col':         '#FFFFFF'
         }
         #
         self.setStyleSheet('''
             QTreeWidget {{background: {exp_window_bgr_col:s};}}
             QTreeWidgetItem {{color: {arg_font_col:s};}}
-            QWidget {{font - size: {all_font_size:f}pt}}
-            QLineEdit {{color: {arg_font_col:s};}}
-            QSpinBox {{color: {arg_font_col:s};}}
-            QDoubleSpinBox {{color: {arg_font_col:s};}}
+            QWidget {{font-size: {all_font_size:f}pt;}}
+            QLineEdit {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
+            QSpinBox {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
+            QDoubleSpinBox {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
         '''.format(**darkmode_options))
         # '''.format(self.palette().shadow().color().name() ))
         # tmp remove - darkmode
