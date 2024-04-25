@@ -164,6 +164,9 @@ class _AppletDock(QDockWidgetCloseDetect):
             command = command_tpl.safe_substitute(
                 python=python,
                 artiq_applet=python + " -m artiq.applets.",
+                # LAX - support special LAX syntax
+                LAX_applet=python + " -m LAX_exp.applets."
+                # LAX - support special LAX syntax
                 **self.extra_substitutes
             )
             logger.debug("starting command %s for %s", command, self.applet_name)
