@@ -33,7 +33,10 @@ class _Model(QtCore.QAbstractItemModel):
         timer.start(100)
 
         self.fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
-        self.fixed_font.setPointSize(12)
+        ### tmp remove - darkmode
+        # self.fixed_font.setPointSize(12)
+        self.fixed_font.setPointSize(16)
+        ### tmp remove - darkmode
 
         self.white = QtGui.QBrush(QtGui.QColor(255, 255, 255))
         self.black = QtGui.QBrush(QtGui.QColor(0, 0, 0))
@@ -41,11 +44,11 @@ class _Model(QtCore.QAbstractItemModel):
         # self.warning_bg = QtGui.QBrush(QtGui.QColor(255, 255, 180))
         # self.error_bg = QtGui.QBrush(QtGui.QColor(255, 150, 150))
 
-        # tmp remove - darkmode
+        ### tmp remove - darkmode
         self.warning_bg = QtGui.QBrush(QtGui.QColor(90, 80, 180))
         self.error_bg = QtGui.QBrush(QtGui.QColor(50, 80, 40))
         self.lightGray = QtGui.QBrush(QtCore.Qt.lightGray)
-        # tmp remove - darkmode
+        ### tmp remove - darkmode
 
 
     def headerData(self, col, orientation, role):

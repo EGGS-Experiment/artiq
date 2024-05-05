@@ -116,7 +116,7 @@ def main():
     atexit.register(loop.close)
     smgr = state.StateManager(args.db_file)
 
-    # tmp remove darkmode
+    ### tmp remove darkmode
     from PyQt5.QtCore import Qt
     from PyQt5.QtGui import QColor, QPalette
     palette = QtGui.QPalette()
@@ -149,8 +149,22 @@ def main():
     palette.setColor(QPalette.HighlightedText,      Qt.black)
     app.setPalette(palette)
 
-    app.setStyleSheet("QWidget {{font-size: {:f}pt;}}".format(12))
-    # tmp remove darkmode
+    # implement GUI display options
+    darkmode_options = {
+        'exp_window_bgr_col':   '#484848',
+        'all_font_size':        18,
+        'arg_font_col':         'black',
+        'text_bgr_col':         '#FFFFFF'
+    }
+    app.setStyleSheet('''
+        QTreeWidget {{background: {exp_window_bgr_col:s};}}
+        QTreeWidgetItem {{color: {arg_font_col:s};}}
+        QWidget {{font-size: {all_font_size:f}pt;}}
+        QLineEdit {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
+        QSpinBox {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
+        QDoubleSpinBox {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
+    '''.format(**darkmode_options))
+    ### tmp remove darkmode
 
     # create connections to master
     rpc_clients = dict()
@@ -289,6 +303,7 @@ def main():
     # run
     main_window.show()
     loop.run_until_complete(main_window.exit_request.wait())
+
 
 if __name__ == "__main__":
     main()
