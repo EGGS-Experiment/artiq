@@ -189,16 +189,20 @@ class ExplicitScan(ScanObject):
         return {"ty": "ExplicitScan", "sequence": self.sequence}
 
 
-class _MultiScanObject:
+class MultiScan:
     """todo document"""
-    def __init__(self, sequence, randomize=False, seed=None):
-        self.sequence = sequence
-        self.randomize = randomize
-        self.seed = seed
+    def __init__(self, sequence):
+        # todo: compile sequence
+        self.sequence_scannables = sequence
 
-        if randomize:
-            rng = random.Random(seed)
-            random.shuffle(self.sequence, rng.random)
+        self.sequence = []
+        for scan_dj in self.sequence_scannables:
+            cls = _ty_to_scan[scan_dj["ty"]]
+            args = dict()
+            for arg in inspect.getfullargspec(cls).args[1:]:
+                if arg in scan_dj:
+                    args[arg] = scan_dj[arg]
+            self.sequence.extend(list(cls(**args)))
 
     def __iter__(self):
         return iter(self.sequence)
@@ -208,8 +212,8 @@ class _MultiScanObject:
 
     def describe(self):
         return {"ty": "MultiScanObject",
-                "randomize": self.randomize,
-                "seed": self.seed}
+                "sequence": self.sequence_scannables}
+
 
 
 _ty_to_scan = {
@@ -217,7 +221,8 @@ _ty_to_scan = {
     "RangeScan": RangeScan,
     "CenterScan": CenterScan,
     "LinearScan": LinearScan,
-    "ExplicitScan": ExplicitScan
+    "ExplicitScan": ExplicitScan,
+    "MultiScan": MultiScan
 }
 
 
@@ -285,6 +290,7 @@ class Scannable:
         return self.default_values[0]
 
     def process(self, x):
+        # send only relevant arguments to the desired scan type
         cls = _ty_to_scan[x["ty"]]
         args = dict()
         for arg in inspect.getfullargspec(cls).args[1:]:
@@ -294,121 +300,6 @@ class Scannable:
 
     def describe(self):
         d = {"ty": "Scannable"}
-        if hasattr(self, "default_values"):
-            d["default"] = [d.describe() for d in self.default_values]
-        d["unit"] = self.unit
-        d["scale"] = self.scale
-        d["global_step"] = self.global_step
-        d["global_min"] = self.global_min
-        d["global_max"] = self.global_max
-        d["ndecimals"] = self.ndecimals
-        return d
-
-
-class MultiScannable:
-    """An argument (as defined in :class:`artiq.language.environment`) that
-    takes multiple scan objects and combines/flattens them into a single one.
-
-    When ``scale`` is not specified, and the unit is a common one (i.e.
-    defined in ``artiq.language.units``), then the scale is obtained from
-    the unit using a simple string match. For example, milliseconds (``"ms"``)
-    units set the scale to 0.001. No unit (default) corresponds to a scale of
-    1.0.
-
-    For arguments with uncommon or complex units, use both the unit parameter
-    (a string for display) and the scale parameter (a numerical scale for
-    experiments).
-    For example, a scan shown between 1 xyz and 10 xyz in the GUI with
-    ``scale=0.001`` and ``unit="xyz"`` results in values between 0.001 and
-    0.01 being scanned.
-
-    :param default: The default scan object(s). This parameter can be a list of
-        scan objects, in which case the first one is used as default and the
-        others are used to configure the default values of scan types that are
-        not initially selected in the GUI.***todo: fix
-    :param global_min: The minimum value taken by the scanned variable, common
-        to all scan modes. The user interface takes this value to set the
-        range of its input widgets.
-    :param global_max: Same as global_min, but for the maximum value.
-    :param global_step: The step with which the value should be modified by
-        up/down buttons in a user interface. The default is the scale divided
-        by 10.
-    :param unit: A string representing the unit of the scanned variable.
-    :param scale: A numerical scaling factor by which the displayed values
-        are multiplied when referenced in the experiment.
-    :param ndecimals: The number of decimals a UI should use.
-    """
-    def __init__(self, default=NoDefault, unit="", scale=None,
-                 global_step=None, global_min=None, global_max=None,
-                 ndecimals=2,
-                 min_scans=1, max_scans=10):
-
-        # check input is valid
-        if scale is None:
-            if unit == "":
-                scale = 1.0
-            else:
-                try:
-                    scale = getattr(units, unit)
-                except AttributeError:
-                    raise KeyError("Unit {} is unknown, you must specify "
-                                   "the scale manually".format(unit))
-
-        if global_step is None:
-            global_step = scale/10.0
-
-        if default is not NoDefault:
-            if not isinstance(default, list):
-                default = [default]
-            self.default_values = default
-
-        # set attributes
-        self.unit = unit
-        self.scale = scale
-        self.global_step = global_step
-        self.global_min = global_min
-        self.global_max = global_max
-        self.ndecimals = ndecimals
-
-        # set MultiScan specific attributes
-        self.min_scans = min_scans
-        self.max_scans = max_scans
-
-    def default(self):
-        if not hasattr(self, "default_values"):
-            raise DefaultMissing
-        return self.default_values
-
-    def process(self, x):
-        combined_scan_sequence = list()
-
-        # ensure number of scans is less than max allowed
-        if len(x) > self.max_scans:
-            raise Exception("Error: more scans than allowed.")
-
-        # get MultiScan arguments
-        parent_args = dict()
-        for arg in inspect.getfullargspec(_MultiScanObject).parent_args[1:]:
-            if arg in x:
-                parent_args[arg] = x[arg]
-
-        # create and combine scan objects
-        for val in x:
-            # instantiate scan object
-            cls = _ty_to_scan[val["ty"]]
-            cls_args = dict()
-            for arg in inspect.getfullargspec(cls).cls_args[1:]:
-                if arg in x:
-                    cls_args[arg] = x[arg]
-
-            # get scan sequence and add to parent sequence
-            combined_scan_sequence.extend(cls(**cls_args).sequence)
-
-        return _MultiScanObject(combined_scan_sequence, **parent_args)
-
-    def describe(self):
-        # create
-        d = {"ty": "MultiScannable"}
         if hasattr(self, "default_values"):
             d["default"] = [d.describe() for d in self.default_values]
         d["unit"] = self.unit

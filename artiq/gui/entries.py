@@ -357,6 +357,7 @@ class _CenterScan(LayoutWidget):
         step.valueChanged.connect(update_step)
         randomize.stateChanged.connect(update_randomize)
 
+
 class _LinearScan(LayoutWidget):
     def __init__(self, procdesc, state):
         LayoutWidget.__init__(self)
@@ -448,14 +449,78 @@ class _ExplicitScan(LayoutWidget):
         self.value.textEdited.connect(update)
 
 
+class _MultiScan(LayoutWidget):
+    def __init__(self, procdesc, state):
+        LayoutWidget.__init__(self)
+        self.procdesc = procdesc
+        self.state = state
+
+        # always clear multiscannable
+        state["sequence"].clear()
+        scannable_list = state["sequence"]
+
+        # user entry - number of scans
+        self.num_scans = QtWidgets.QSpinBox()
+        self.num_scans.setRange(1, 3)
+        self.num_scans.setValue(1)
+        disable_scroll_wheel(self.num_scans)
+        self.addWidget(QtWidgets.QLabel("Number of Scans:"), 1, 0)
+        self.addWidget(self.num_scans, 1, 1)
+
+        # create subscan holder
+        self.subscan_holder = QtWidgets.QTreeWidget()
+        self.subscan_holder.setColumnCount(2)
+        self.subscan_holder.header().setVisible(False)
+        self.addWidget(self.subscan_holder, 2, 0, colspan=3)
+
+
+        # create subscannables based on num_scans
+        def update_num_scans(value):
+            num_scans_current = self.subscan_holder.topLevelItemCount()
+
+            # create more scans and pass them argument
+            if num_scans_current < value:
+                for i in range(num_scans_current, value):
+                    # create new state dict
+                    scannable_list.append(ScanEntry.default_state(procdesc))
+                    # scannable_list[i].pop("MultiScan", None)
+
+                    # create sub-Scannable widget without a MultiScan option (to prevent nesting)
+                    _qtreewidget_holder = QtWidgets.QTreeWidgetItem(["Scan {}".format(i)])
+                    subscan_widget = ScanEntry({"desc": procdesc, "state": scannable_list[i]})
+                    subscan_widget.radiobuttons["MultiScan"].hide()
+
+                    # wrap sub-Scannable in a LayoutWidget and add to parent holder
+                    subscan_widget_holder = LayoutWidget()
+                    subscan_widget_holder.addWidget(subscan_widget)
+                    self.subscan_holder.addTopLevelItem(_qtreewidget_holder)
+                    self.subscan_holder.setItemWidget(_qtreewidget_holder, 1, subscan_widget_holder)
+
+            # remove scans and delete them
+            elif num_scans_current > value:
+                for i in range(num_scans_current, value, -1):
+                    self.subscan_holder.takeTopLevelItem(i - 1)
+                    scannable_list.pop(1)
+
+            # print("subscannables: {}".format(len(scannable_list)))
+
+        # connect signal to slot
+        self.num_scans.valueChanged.connect(update_num_scans)
+
+        # initialize!
+        self.num_scans.setValue(1)
+
+
 class ScanEntry(LayoutWidget):
     def __init__(self, argument):
         LayoutWidget.__init__(self)
         self.argument = argument
 
+        # use QStackedWidget to selectively display a single scan type
         self.stack = QtWidgets.QStackedWidget()
         self.addWidget(self.stack, 1, 0, colspan=4)
 
+        # create scan type entries
         procdesc = argument["desc"]
         state = argument["state"]
         self.widgets = OrderedDict()
@@ -464,25 +529,32 @@ class ScanEntry(LayoutWidget):
         self.widgets["CenterScan"] = _CenterScan(procdesc, state["CenterScan"])
         self.widgets["LinearScan"] = _LinearScan(procdesc, state["LinearScan"])
         self.widgets["ExplicitScan"] = _ExplicitScan(state["ExplicitScan"])
+        self.widgets["MultiScan"] = _MultiScan(procdesc, state["MultiScan"])
         for widget in self.widgets.values():
             self.stack.addWidget(widget)
 
+        # create radio buttons for different scan types
         self.radiobuttons = OrderedDict()
         self.radiobuttons["NoScan"] = QtWidgets.QRadioButton("No scan")
         self.radiobuttons["RangeScan"] = QtWidgets.QRadioButton("Range")
         self.radiobuttons["CenterScan"] = QtWidgets.QRadioButton("Center")
         self.radiobuttons["LinearScan"] = QtWidgets.QRadioButton("Linear")
         self.radiobuttons["ExplicitScan"] = QtWidgets.QRadioButton("Explicit")
+        self.radiobuttons["MultiScan"] = QtWidgets.QRadioButton("Multi")
         scan_type = QtWidgets.QButtonGroup()
         for n, b in enumerate(self.radiobuttons.values()):
             self.addWidget(b, 0, n)
             scan_type.addButton(b)
             b.toggled.connect(self._scan_type_toggled)
 
+        # select default scan type
         selected = argument["state"]["selected"]
         self.radiobuttons[selected].setChecked(True)
 
     def disable(self):
+        """
+        Set scan type to NoScan.
+        """
         self.radiobuttons["NoScan"].setChecked(True)
         self.widgets["NoScan"].repetitions.setValue(1)
 
@@ -507,7 +579,8 @@ class ScanEntry(LayoutWidget):
             "LinearScan": {"start": 0. * scale, "stop": 100. * scale,
                            "step": 10. * scale, "randomize": False,
                            "seed": None},
-            "ExplicitScan": {"sequence": []}
+            "ExplicitScan": {"sequence": []},
+            "MultiScan": {"sequence": []}
         }
         if "default" in procdesc:
             defaults = procdesc["default"]
@@ -545,121 +618,10 @@ class ScanEntry(LayoutWidget):
                 break
 
 
-class MultiScanEntry(LayoutWidget):
-    def __init__(self, argument):
-        # initialize self
-        LayoutWidget.__init__(self)
-        self.argument = argument
-        procdesc = argument["desc"]
-        state = argument["state"]
-
-        # create nested scan holder
-        self.scan_holder_widget = QtWidgets.QTreeWidget()
-        self.scan_holder_widget.setColumnCount(2)
-        self.addWidget(self.scan_holder_widget, 1, 0, colspan=4)
-
-        # add MultiScan configuration buttons
-        multiscan_config_bar = QtWidgets.QTreeWidgetItem()
-        self.scan_holder_widget.setHeaderItem(multiscan_config_bar)
-
-        self.scan_add_button = QtWidgets.QPushButton("Add")
-        # todo: set button icon
-        # recompute_arguments = QtWidgets.QPushButton("Recompute all arguments")
-        # recompute_arguments.setIcon(
-        #     QtWidgets.QApplication.style().standardIcon(
-        #         QtWidgets.QStyle.SP_BrowserReload))
-        self.scan_holder_widget.add
-
-        # create qstackedwidget to only show one scan at a time
-        self.stack = QtWidgets.QStackedWidget()
-        self.addWidget(self.stack, 1, 0, colspan=4)
-
-        # add scan widgets to qstackwidget
-        self.widgets = OrderedDict()
-        self.widgets["RangeScan"] = _RangeScan(procdesc, state["RangeScan"])
-        self.widgets["CenterScan"] = _CenterScan(procdesc, state["CenterScan"])
-        self.widgets["LinearScan"] = _LinearScan(procdesc, state["LinearScan"])
-        for widget in self.widgets.values():
-            self.stack.addWidget(widget)
-
-        # create radio buttons to select scan type
-        self.radiobuttons = OrderedDict()
-        self.radiobuttons["RangeScan"] = QtWidgets.QRadioButton("Range")
-        self.radiobuttons["CenterScan"] = QtWidgets.QRadioButton("Center")
-        self.radiobuttons["LinearScan"] = QtWidgets.QRadioButton("Linear")
-        scan_type = QtWidgets.QButtonGroup()
-        for n, b in enumerate(self.radiobuttons.values()):
-            self.addWidget(b, 0, n)
-            scan_type.addButton(b)
-            b.toggled.connect(self._scan_type_toggled)
-
-        # todo document
-        selected = argument["state"]["selected"]
-        self.radiobuttons[selected].setChecked(True)
-
-    def _addScan(self):
-        pass
-
-    def _removeScan(self):
-        pass
-
-    def disable(self):
-        self.radiobuttons["NoScan"].setChecked(True)
-        self.widgets["NoScan"].repetitions.setValue(1)
-
-    @staticmethod
-    def state_to_value(state):
-        selected = state["selected"]
-        r = dict(state[selected])
-        r["ty"] = selected
-        return r
-
-    @staticmethod
-    def default_state(procdesc):
-        scale = procdesc["scale"]
-        state = {
-            "selected": "RangeScan",
-            "RangeScan": {"start": 0.0, "stop": 100.0*scale, "npoints": 10,
-                          "randomize": False, "seed": None},
-            "CenterScan": {"center": 0.*scale, "span": 100.*scale,
-                           "step": 10.*scale, "randomize": False,
-                           "seed": None},
-            "LinearScan": {"start": 0. * scale, "stop": 100. * scale,
-                           "step": 10. * scale, "randomize": False,
-                           "seed": None}
-        }
-        if "default" in procdesc:
-            defaults = procdesc["default"]
-            if not isinstance(defaults, list):
-                defaults = [defaults]
-            state["selected"] = defaults[0]["ty"]
-            for default in reversed(defaults):
-                ty = default["ty"]
-                if ty == "RangeScan":
-                    state[ty]["start"] = default["start"]
-                    state[ty]["stop"] = default["stop"]
-                    state[ty]["npoints"] = default["npoints"]
-                    state[ty]["randomize"] = default["randomize"]
-                    state[ty]["seed"] = default["seed"]
-                elif ty == "CenterScan":
-                    for key in "center span step randomize seed".split():
-                        state[ty][key] = default[key]
-                elif ty == "LinearScan":
-                    for key in "start stop step randomize seed".split():
-                        state[ty][key] = default[key]
-                else:
-                    logger.warning("unknown default type: %s", ty)
-        return state
-
-    def _scan_type_toggled(self):
-        for ty, button in self.radiobuttons.items():
-            if button.isChecked():
-                self.stack.setCurrentWidget(self.widgets[ty])
-                self.argument["state"]["selected"] = ty
-                break
-
-
 def procdesc_to_entry(procdesc):
+    """
+    Create corresponding argument widget from procdesc.
+    """
     ty = procdesc["ty"]
     if ty == "NumberValue":
         is_int = (procdesc["ndecimals"] == 0
@@ -676,5 +638,4 @@ def procdesc_to_entry(procdesc):
             "EnumerationValue": EnumerationEntry,
             "StringValue": StringEntry,
             "Scannable": ScanEntry
-            #"MultiScannable": MultiScanEntry
         }[ty]
