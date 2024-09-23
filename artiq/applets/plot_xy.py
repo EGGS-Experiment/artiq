@@ -56,7 +56,7 @@ class XYPlot(pyqtgraph.PlotWidget):
             return
 
         self.clear()
-        self.plot(x, y, pen=None, symbol="x")
+        self.plot(x, y, pen='g', symbol="x")
         self.setTitle(title)
         if error is not None:
             # See https://github.com/pyqtgraph/pyqtgraph/issues/211
