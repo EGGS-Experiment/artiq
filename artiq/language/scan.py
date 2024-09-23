@@ -197,11 +197,14 @@ class MultiScan:
 
         self.sequence = []
         for scan_dj in self.sequence_scannables:
-            cls = _ty_to_scan[scan_dj["ty"]]
+            scan_type = scan_dj["selected"]
+            scan_type_args = scan_dj[scan_type]
+
+            cls = _ty_to_scan[scan_type]
             args = dict()
             for arg in inspect.getfullargspec(cls).args[1:]:
-                if arg in scan_dj:
-                    args[arg] = scan_dj[arg]
+                if arg in scan_type_args:
+                    args[arg] = scan_type_args[arg]
             self.sequence.extend(list(cls(**args)))
 
     def __iter__(self):
