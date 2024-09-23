@@ -37,6 +37,7 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         self.manager = manager
         self.expurl = expurl
 
+        # configure self
         QtWidgets.QTreeWidget.__init__(self)
         self.setColumnCount(3)
         self.header().setStretchLastSection(False)
@@ -52,10 +53,10 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         self.setHorizontalScrollMode(self.ScrollPerPixel)
         self.setVerticalScrollMode(self.ScrollPerPixel)
 
-        # tmp remove - darkmode
+        ### tmp remove - darkmode
         darkmode_options = {
             'exp_window_bgr_col':   '#484848',
-            'all_font_size':        12.5,
+            'all_font_size':        16,
             'arg_font_col':         'black',
             'text_bgr_col':         '#FFFFFF'
         }
@@ -69,23 +70,24 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
             QDoubleSpinBox {{color: {arg_font_col:s}; background: {text_bgr_col:s};}}
         '''.format(**darkmode_options))
         # '''.format(self.palette().shadow().color().name() ))
-        # tmp remove - darkmode
+        ### tmp remove - darkmode
 
         self.viewport().installEventFilter(_WheelFilter(self.viewport()))
 
         self._groups = dict()
         self._arg_to_widgets = dict()
 
-        arguments = self.manager.get_submission_arguments(self.expurl)
 
+        # get experiment arguments from manager
+        arguments = self.manager.get_submission_arguments(self.expurl)
         if not arguments:
             self.addTopLevelItem(QtWidgets.QTreeWidgetItem(["No arguments"]))
 
+
+        ### tmp remove - darkmode
         gradient = QtGui.QLinearGradient(
             0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()*2.5)
 
-
-        # tmp remove - darkmode
         # sets the color gradient for argument boxes in the experiment widgets
         # gradient.setColorAt(0, self.palette().base().color())
         # gradient.setColorAt(1, self.palette().midlight().color())
@@ -95,34 +97,45 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
 
         gradient.setColorAt(0, self.palette().shadow().color())
         gradient.setColorAt(1, QtGui.QColor(39, 39, 39))
-        # tmp remove - darkmode
+        ### tmp remove - darkmode
 
 
+        # create widgets for all arguments
         for name, argument in arguments.items():
             widgets = dict()
             self._arg_to_widgets[name] = widgets
 
-            entry = procdesc_to_entry(argument["desc"])(argument)
+            # create argument widget (widget_item)
             widget_item = QtWidgets.QTreeWidgetItem([name])
             if argument["tooltip"]:
                 widget_item.setToolTip(0, argument["tooltip"])
-            widgets["entry"] = entry
             widgets["widget_item"] = widget_item
 
+            # set background colors for each column in widget_item
             for col in range(3):
                 widget_item.setBackground(col, gradient)
+            # set bold font for widget
             font = widget_item.font(0)
             font.setBold(True)
             widget_item.setFont(0, font)
 
+            # add widget to argument editor (widget_item)
             if argument["group"] is None:
                 self.addTopLevelItem(widget_item)
             else:
                 self._get_group(argument["group"]).addChild(widget_item)
+
+
+            # create user input widget (entry)
+            entry = procdesc_to_entry(argument["desc"])(argument)
+            widgets["entry"] = entry
             fix_layout = LayoutWidget()
             widgets["fix_layout"] = fix_layout
             fix_layout.addWidget(entry)
             self.setItemWidget(widget_item, 1, fix_layout)
+
+
+            # widget - recompute argument
             recompute_argument = QtWidgets.QToolButton()
             recompute_argument.setToolTip("Re-run the experiment's build "
                                           "method and take the default value")
@@ -132,9 +145,7 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
             recompute_argument.clicked.connect(
                 partial(self._recompute_argument_clicked, name))
 
-            tool_buttons = LayoutWidget()
-            tool_buttons.addWidget(recompute_argument, 1)
-
+            # widget - disable other scans (scannables only)
             disable_other_scans = QtWidgets.QToolButton()
             widgets["disable_other_scans"] = disable_other_scans
             disable_other_scans.setIcon(
@@ -144,6 +155,10 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
                                            "this experiment")
             disable_other_scans.clicked.connect(
                 partial(self._disable_other_scans, name))
+
+            # widget - tool buttons (holds recompute argument, disable other scans)
+            tool_buttons = LayoutWidget()
+            tool_buttons.addWidget(recompute_argument, 1)
             tool_buttons.layout.setRowStretch(0, 1)
             tool_buttons.layout.setRowStretch(3, 1)
             tool_buttons.addWidget(disable_other_scans, 2)
@@ -152,19 +167,25 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
 
             self.setItemWidget(widget_item, 2, tool_buttons)
 
+
+        # create experiment buttons - options that act on the entire experiment
         widget_item = QtWidgets.QTreeWidgetItem()
         self.addTopLevelItem(widget_item)
+
+        # experiment buttons - recompute/refresh arguments
         recompute_arguments = QtWidgets.QPushButton("Recompute all arguments")
         recompute_arguments.setIcon(
             QtWidgets.QApplication.style().standardIcon(
                 QtWidgets.QStyle.SP_BrowserReload))
         recompute_arguments.clicked.connect(dock._recompute_arguments_clicked)
 
+        # experiment buttons - load arguments from hdf5
         load_hdf5 = QtWidgets.QPushButton("Load HDF5")
         load_hdf5.setIcon(QtWidgets.QApplication.style().standardIcon(
             QtWidgets.QStyle.SP_DialogOpenButton))
         load_hdf5.clicked.connect(dock._load_hdf5_clicked)
 
+        # lay out experiment buttons
         buttons = LayoutWidget()
         buttons.addWidget(recompute_arguments, 1, 1)
         buttons.addWidget(load_hdf5, 1, 2)
@@ -426,26 +447,38 @@ class _ExperimentDock(QtWidgets.QMdiSubWindow):
             logger.error("Failed to request termination of instances of '%s'",
                          self.expurl, exc_info=True)
 
+
+    '''ARGUMENT MANAGEMENT BUTTONS'''
+
+    # recompute arguments button
     def _recompute_arguments_clicked(self):
         asyncio.ensure_future(self._recompute_arguments_task())
 
     async def _recompute_arguments_task(self, overrides=dict()):
+        # retrieve experiment description and ui
+        # todo: is this recomputed awhole?
         try:
             expdesc, ui_name = await self.manager.compute_expdesc(self.expurl)
         except:
             logger.error("Could not recompute experiment description of '%s'",
                          self.expurl, exc_info=True)
             return
+
+        # override arguments in recomputed expdesc
         arginfo = expdesc["arginfo"]
         for k, v in overrides.items():
-            # Some values (e.g. scans) may have multiple defaults in a list
-            if ("default" in arginfo[k][0]
-                    and isinstance(arginfo[k][0]["default"], list)):
-                arginfo[k][0]["default"].insert(0, v)
-            else:
-                arginfo[k][0]["default"] = v
+            try:
+                # Some values (e.g. scans) may have multiple defaults in a list
+                if ("default" in arginfo[k][0]
+                        and isinstance(arginfo[k][0]["default"], list)):
+                    arginfo[k][0]["default"].insert(0, v)
+                else:
+                    arginfo[k][0]["default"] = v
+            except KeyError:
+                pass
         self.manager.initialize_submission_arguments(self.expurl, arginfo, ui_name)
 
+        ### tmp remove - idk
         argeditor_state = self.argeditor.save_state()
         self.argeditor.deleteLater()
 
@@ -480,6 +513,7 @@ class _ExperimentDock(QtWidgets.QMdiSubWindow):
         asyncio.ensure_future(self._load_hdf5_task())
 
     async def _load_hdf5_task(self):
+        # get hdf5 file
         try:
             filename = await get_open_file_name(
                 self.manager.main_window, "Load HDF5",
@@ -489,17 +523,18 @@ class _ExperimentDock(QtWidgets.QMdiSubWindow):
             return
         self.hdf5_load_directory = os.path.dirname(filename)
 
+        # extract expid from hdf5 file
         try:
             with h5py.File(filename, "r") as f:
                 expid = f["expid"][()]
             expid = pyon.decode(expid)
-            print(expid)
             arguments = expid["arguments"]
         except:
             logger.error("Could not retrieve expid from HDF5 file",
                          exc_info=True)
             return
 
+        # configure experiment options
         try:
             self.log_level.setCurrentIndex(log_levels.index(
                 log_level_to_name(expid["log_level"])))
