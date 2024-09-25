@@ -54,13 +54,13 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
         self.setVerticalScrollMode(self.ScrollPerPixel)
 
         ### tmp remove - darkmode
+        ### NOTE: CHANGE EXPERIMENT WIDGET FONT SIZE HERE ###
         darkmode_options = {
             'exp_window_bgr_col':   '#484848',
-            'all_font_size':        16,
+            'all_font_size':        12.8,
             'arg_font_col':         'black',
             'text_bgr_col':         '#FFFFFF'
         }
-        #
         self.setStyleSheet('''
             QTreeWidget {{background: {exp_window_bgr_col:s};}}
             QTreeWidgetItem {{color: {arg_font_col:s};}}
@@ -86,7 +86,8 @@ class _ArgumentEditor(QtWidgets.QTreeWidget):
 
         ### tmp remove - darkmode
         gradient = QtGui.QLinearGradient(
-            0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()*2.5)
+            0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()*2.5
+        )
 
         # sets the color gradient for argument boxes in the experiment widgets
         # gradient.setColorAt(0, self.palette().base().color())

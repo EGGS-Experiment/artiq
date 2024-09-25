@@ -455,11 +455,12 @@ class _MultiScan(LayoutWidget):
         self.procdesc = procdesc
         self.state = state
 
-        # always clear multiscannable
+        # always clear multiscannable arguments
         state["sequence"].clear()
         scannable_list = state["sequence"]
+        state["configuration"] = "Normal"
 
-        # user entry - number of scans
+        # create scan number widget
         self.num_scans = QtWidgets.QSpinBox()
         self.num_scans.setRange(1, 3)
         self.num_scans.setValue(1)
@@ -467,14 +468,33 @@ class _MultiScan(LayoutWidget):
         self.addWidget(QtWidgets.QLabel("Number of Scans:"), 1, 0)
         self.addWidget(self.num_scans, 1, 1)
 
-        # create subscan holder
+        # create scan configuration widget
+        self.addWidget(QtWidgets.QLabel("Configuration"), 2, 0)
+        self.configuration = QtWidgets.QComboBox()
+        disable_scroll_wheel(self.configuration)
+        configuration_options = ["Normal", "Randomize", "Interleave"]
+        self.configuration.addItems(configuration_options)
+        self.configuration.setCurrentIndex(0)
+        self.addWidget(self.configuration, 2, 1)
+
+        # create subscan holder widget
         self.subscan_holder = QtWidgets.QTreeWidget()
         self.subscan_holder.setColumnCount(2)
         self.subscan_holder.header().setVisible(False)
-        self.addWidget(self.subscan_holder, 2, 0, colspan=3)
+        self.subscan_holder.setHorizontalScrollMode(self.subscan_holder.ScrollPerPixel)
+        self.subscan_holder.setVerticalScrollMode(self.subscan_holder.ScrollPerPixel)
+        self.subscan_holder.setStyleSheet('''
+            QTreeWidget::item {
+                border-top: 4px solid black;
+                border-bottom: 4px solid black;
+            }
+        ''')
+        self.addWidget(self.subscan_holder, 3, 0, colspan=3)
 
+        # slots - event processors
+        def update_configuration(index):
+            state["configuration"] = configuration_options[index]
 
-        # create subscannables based on num_scans
         def update_num_scans(value):
             num_scans_current = self.subscan_holder.topLevelItemCount()
 
@@ -502,11 +522,9 @@ class _MultiScan(LayoutWidget):
                     self.subscan_holder.takeTopLevelItem(i - 1)
                     scannable_list.pop(1)
 
-        # connect signal to slot
+        # connect signals to slot
+        self.configuration.currentIndexChanged.connect(update_configuration)
         self.num_scans.valueChanged.connect(update_num_scans)
-
-        # initialize!
-        self.num_scans.setValue(1)
 
 
 class ScanEntry(LayoutWidget):
@@ -516,7 +534,7 @@ class ScanEntry(LayoutWidget):
 
         # use QStackedWidget to selectively display a single scan type
         self.stack = QtWidgets.QStackedWidget()
-        self.addWidget(self.stack, 1, 0, colspan=4)
+        self.addWidget(self.stack, 1, 0, colspan=6)
 
         # create scan type entries
         procdesc = argument["desc"]
@@ -578,7 +596,7 @@ class ScanEntry(LayoutWidget):
                            "step": 10. * scale, "randomize": False,
                            "seed": None},
             "ExplicitScan": {"sequence": []},
-            "MultiScan": {"sequence": []}
+            "MultiScan": {"sequence": [], "configuration": "Normal"}
         }
         if "default" in procdesc:
             defaults = procdesc["default"]

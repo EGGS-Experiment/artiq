@@ -152,7 +152,7 @@ def main():
     # implement GUI display options
     darkmode_options = {
         'exp_window_bgr_col':   '#484848',
-        'all_font_size':        18,
+        'all_font_size':        12,
         'arg_font_col':         'black',
         'text_bgr_col':         '#FFFFFF'
     }
