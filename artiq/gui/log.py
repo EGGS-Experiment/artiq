@@ -35,7 +35,7 @@ class _Model(QtCore.QAbstractItemModel):
         self.fixed_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.FixedFont)
         ### tmp remove - darkmode
         # self.fixed_font.setPointSize(12)
-        self.fixed_font.setPointSize(16)
+        self.fixed_font.setPointSize(13)
         ### tmp remove - darkmode
 
         self.white = QtGui.QBrush(QtGui.QColor(255, 255, 255))

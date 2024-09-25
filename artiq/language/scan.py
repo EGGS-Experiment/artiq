@@ -19,7 +19,7 @@ iterators are independent from each other.
 
 import random
 import inspect
-from itertools import product
+from itertools import product, zip_longest
 
 from artiq.language.core import *
 from artiq.language.environment import NoDefault, DefaultMissing
@@ -189,14 +189,12 @@ class ExplicitScan(ScanObject):
         return {"ty": "ExplicitScan", "sequence": self.sequence}
 
 
-class MultiScan:
+class MultiScan(ScanObject):
     """todo document"""
-    def __init__(self, sequence):
-        # todo: compile sequence
-        self.sequence_scannables = sequence
-
-        self.sequence = []
-        for scan_dj in self.sequence_scannables:
+    def __init__(self, sequence, configuration):
+        # initialize subscannables and append to a holding list
+        subscannable_list = []
+        for scan_dj in sequence:
             scan_type = scan_dj["selected"]
             scan_type_args = scan_dj[scan_type]
 
@@ -205,7 +203,30 @@ class MultiScan:
             for arg in inspect.getfullargspec(cls).args[1:]:
                 if arg in scan_type_args:
                     args[arg] = scan_type_args[arg]
-            self.sequence.extend(list(cls(**args)))
+            subscannable_list.extend(list(cls(**args)))
+
+        # process configuration
+        self.sequence = []
+        # normal: join subscannables sequentially
+        if configuration == "Normal":
+            for subscannable in subscannable_list:
+                self.sequence.extend(subscannable)
+
+        # randomize: mix subscannables and randomize
+        elif configuration == "Randomize":
+            for subscannable in subscannable_list:
+                self.sequence.extend(subscannable)
+            rng = random.Random(None)
+            random.shuffle(self.sequence, rng.random)
+
+        # interleave: interleave the subscannables sequentially
+        # note: works for arbitrary number of subscannables
+        elif configuration == "Interleave":
+            self.sequence = [
+                y
+                for x in zip_longest(*subscannable_list, fillvalue=None)
+                for y in x if y is not None
+            ]
 
     def __iter__(self):
         return iter(self.sequence)
@@ -214,8 +235,7 @@ class MultiScan:
         return len(self.sequence)
 
     def describe(self):
-        return {"ty": "MultiScanObject",
-                "sequence": self.sequence_scannables}
+        return {"ty": "MultiScan", "sequence": self.sequence}
 
 
 
