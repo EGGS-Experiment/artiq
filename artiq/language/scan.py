@@ -203,7 +203,7 @@ class MultiScan(ScanObject):
             for arg in inspect.getfullargspec(cls).args[1:]:
                 if arg in scan_type_args:
                     args[arg] = scan_type_args[arg]
-            subscannable_list.extend(list(cls(**args)))
+            subscannable_list.append(list(cls(**args)))
 
         # process configuration
         self.sequence = []
