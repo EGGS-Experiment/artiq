@@ -581,8 +581,4 @@ def is_public_experiment(o):
     """Checks if a Python object is a top-level,
     non underscore-prefixed, experiment class.
     """
-    if is_experiment(o) and o.__name__.startswith("_"):
-        print('\tis public exp: {}'.format(o))
-        print('\t\tname: {}\t:{}'.format(o.__name__, o.__name__.startswith("_")))
-
     return is_experiment(o) and not o.__name__.startswith("_")
