@@ -3,7 +3,7 @@ from operator import and_
 
 from migen import *
 from migen.genlib.resetsync import AsyncResetSynchronizer
-from migen.genlib.cdc import BlindTransfer
+from migen.genlib.cdc import MultiReg, BlindTransfer
 from misoc.interconnect.csr import *
 
 from artiq.gateware.rtio import cri
@@ -18,13 +18,14 @@ class Core(Module, AutoCSR):
         self.cri = cri.Interface()
         self.reset = CSR()
         self.reset_phy = CSR()
+        self.sed_spread_enable = CSRStorage()
         self.async_error = CSR(3)
         self.collision_channel = CSRStatus(16)
         self.busy_channel = CSRStatus(16)
         self.sequence_error_channel = CSRStatus(16)
 
         # Clocking/Reset
-        # Create rsys, rio and rio_phy domains based on sys and rtio
+        # Create rio and rio_phy domains based on sys
         # with reset controlled by CSR.
         #
         # The `rio` CD contains logic that is reset with `core.reset()`.
@@ -40,20 +41,15 @@ class Core(Module, AutoCSR):
             cmd_reset.eq(self.reset.re),
             cmd_reset_phy.eq(self.reset_phy.re)
         ]
-        cmd_reset.attr.add("no_retiming")
-        cmd_reset_phy.attr.add("no_retiming")
 
-        self.clock_domains.cd_rsys = ClockDomain()
         self.clock_domains.cd_rio = ClockDomain()
         self.clock_domains.cd_rio_phy = ClockDomain()
         self.comb += [
-            self.cd_rsys.clk.eq(ClockSignal()),
-            self.cd_rsys.rst.eq(cmd_reset),
-            self.cd_rio.clk.eq(ClockSignal("rtio")),
-            self.cd_rio_phy.clk.eq(ClockSignal("rtio"))
+            self.cd_rio.clk.eq(ClockSignal()),
+            self.cd_rio.rst.eq(cmd_reset),
+            self.cd_rio_phy.clk.eq(ClockSignal()),
+            self.cd_rio_phy.rst.eq(cmd_reset_phy)
         ]
-        self.specials += AsyncResetSynchronizer(self.cd_rio, cmd_reset)
-        self.specials += AsyncResetSynchronizer(self.cd_rio_phy, cmd_reset_phy)
 
         # TSC
         chan_fine_ts_width = max(max(rtlink.get_fine_ts_width(channel.interface.o)
@@ -65,22 +61,23 @@ class Core(Module, AutoCSR):
         # Outputs/Inputs
         quash_channels = [n for n, c in enumerate(channels) if isinstance(c, LogChannel)]
 
-        outputs = SED(channels, tsc.glbl_fine_ts_width, "async",
+        outputs = ClockDomainsRenamer("rio")(SED(channels, tsc.glbl_fine_ts_width,
             quash_channels=quash_channels,
             lane_count=lane_count, fifo_depth=fifo_depth,
-            interface=self.cri)
+            interface=self.cri))
         self.submodules += outputs
         self.comb += outputs.coarse_timestamp.eq(tsc.coarse_ts)
-        self.sync += outputs.minimum_coarse_timestamp.eq(tsc.coarse_ts_sys + 16)
+        self.sync += outputs.minimum_coarse_timestamp.eq(tsc.coarse_ts + 12)
+        self.specials += MultiReg(self.sed_spread_enable.storage, outputs.enable_spread, "rio")
 
-        inputs = InputCollector(tsc, channels, "async",
+        inputs = ClockDomainsRenamer("rio")(InputCollector(tsc, channels,
             quash_channels=quash_channels,
-            interface=self.cri)
+            interface=self.cri))
         self.submodules += inputs
 
         # Asychronous output errors
-        o_collision_sync = BlindTransfer("rio", "rsys", data_width=16)
-        o_busy_sync = BlindTransfer("rio", "rsys", data_width=16)
+        o_collision_sync = BlindTransfer("rio", "sys", data_width=16)
+        o_busy_sync = BlindTransfer("rio", "sys", data_width=16)
         self.submodules += o_collision_sync, o_busy_sync
         o_collision = Signal()
         o_busy = Signal()

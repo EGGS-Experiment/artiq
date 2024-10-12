@@ -1,4 +1,4 @@
-#![feature(never_type, panic_info_message, llvm_asm)]
+#![feature(never_type, panic_info_message, asm, default_alloc_error_handler)]
 #![no_std]
 
 #[macro_use]
@@ -7,22 +7,40 @@ extern crate log;
 extern crate board_misoc;
 extern crate board_artiq;
 extern crate riscv;
+extern crate alloc;
+extern crate proto_artiq;
+extern crate cslice;
+extern crate io;
+extern crate eh;
 
 use core::convert::TryFrom;
-use board_misoc::{csr, ident, clock, uart_logger, i2c, pmp};
+use board_misoc::{csr, ident, clock, config, uart_logger, i2c, pmp};
 #[cfg(has_si5324)]
 use board_artiq::si5324;
-use board_artiq::{spi, drtioaux};
-use board_artiq::drtio_routing;
-#[cfg(has_hmc830_7043)]
-use board_artiq::hmc830_7043;
+#[cfg(has_si549)]
+use board_artiq::si549;
+#[cfg(soc_platform = "kasli")]
+use board_misoc::irq;
+use board_artiq::{spi, drtioaux, drtio_routing};
+#[cfg(soc_platform = "efc")]
+use board_artiq::ad9117;
+use proto_artiq::drtioaux_proto::{SAT_PAYLOAD_MAX_SIZE, MASTER_PAYLOAD_MAX_SIZE};
+#[cfg(has_drtio_eem)]
+use board_artiq::drtio_eem;
 use riscv::register::{mcause, mepc, mtval};
+use dma::Manager as DmaManager;
+use kernel::Manager as KernelManager;
+use analyzer::Analyzer;
+
+#[global_allocator]
+static mut ALLOC: alloc_list::ListAlloc = alloc_list::EMPTY;
 
 mod repeater;
-#[cfg(has_jdcg)]
-mod jdcg;
-#[cfg(any(has_ad9154, has_jdcg))]
-pub mod jdac_common;
+mod routing;
+mod dma;
+mod analyzer;
+mod kernel;
+mod cache;
 
 fn drtiosat_reset(reset: bool) {
     unsafe {
@@ -52,15 +70,53 @@ fn drtiosat_tsc_loaded() -> bool {
     }
 }
 
+fn toggle_sed_spread(val: u8) {
+    unsafe { csr::drtiosat::sed_spread_enable_write(val); }
+}
+
+#[derive(Clone, Copy)]
+pub enum RtioMaster {
+    Drtio,
+    Dma,
+    Kernel
+}
+
+pub fn cricon_select(master: RtioMaster) {
+    let val = match master {
+        RtioMaster::Drtio => 0,
+        RtioMaster::Dma => 1,
+        RtioMaster::Kernel => 2
+    };
+    unsafe {
+        csr::cri_con::selected_write(val);
+    }
+}
+
+pub fn cricon_read() -> RtioMaster {
+    let val = unsafe { csr::cri_con::selected_read() };
+    match val {
+        0 => RtioMaster::Drtio,
+        1 => RtioMaster::Dma,
+        2 => RtioMaster::Kernel,
+        _ => unreachable!()
+    }
+}
 
 #[cfg(has_drtio_routing)]
 macro_rules! forward {
-    ($routing_table:expr, $destination:expr, $rank:expr, $repeaters:expr, $packet:expr) => {{
+    ($router:expr, $routing_table:expr, $destination:expr, $rank:expr, $self_destination:expr, $repeaters:expr, $packet:expr) => {{
         let hop = $routing_table.0[$destination as usize][$rank as usize];
         if hop != 0 {
             let repno = (hop - 1) as usize;
             if repno < $repeaters.len() {
-                return $repeaters[repno].aux_forward($packet);
+                if $packet.expects_response() {
+                    return $repeaters[repno].aux_forward($packet, $router, $routing_table, $rank, $self_destination);
+                } else {
+                    let res = $repeaters[repno].aux_send($packet);
+                    // allow the satellite to parse the packet before next
+                    clock::spin_us(10_000);
+                    return res;
+                }
             } else {
                 return Err(drtioaux::Error::RoutingError);
             }
@@ -70,12 +126,13 @@ macro_rules! forward {
 
 #[cfg(not(has_drtio_routing))]
 macro_rules! forward {
-    ($routing_table:expr, $destination:expr, $rank:expr, $repeaters:expr, $packet:expr) => {}
+    ($router:expr, $routing_table:expr, $destination:expr, $rank:expr, $self_destination:expr, $repeaters:expr, $packet:expr) => {}
 }
 
-fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
-        _routing_table: &mut drtio_routing::RoutingTable, _rank: &mut u8,
-        packet: drtioaux::Packet) -> Result<(), drtioaux::Error<!>> {
+fn process_aux_packet(dmamgr: &mut DmaManager, analyzer: &mut Analyzer, kernelmgr: &mut KernelManager,
+        _repeaters: &mut [repeater::Repeater], _routing_table: &mut drtio_routing::RoutingTable, rank: &mut u8,
+        router: &mut routing::Router, self_destination: &mut u8, packet: drtioaux::Packet
+) -> Result<(), drtioaux::Error<!>> {
     // In the code below, *_chan_sel_write takes an u8 if there are fewer than 256 channels,
     // and u16 otherwise; hence the `as _` conversion.
     match packet {
@@ -94,13 +151,14 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             drtioaux::send(0, &drtioaux::Packet::ResetAck)
         },
 
-        drtioaux::Packet::DestinationStatusRequest { destination: _destination } => {
+        drtioaux::Packet::DestinationStatusRequest { destination } => {
             #[cfg(has_drtio_routing)]
-            let hop = _routing_table.0[_destination as usize][*_rank as usize];
+            let hop = _routing_table.0[destination as usize][*rank as usize];
             #[cfg(not(has_drtio_routing))]
             let hop = 0;
 
             if hop == 0 {
+                *self_destination = destination;
                 let errors;
                 unsafe {
                     errors = csr::drtiosat::rtio_error_read();
@@ -142,8 +200,8 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
                     if hop <= csr::DRTIOREP.len() {
                         let repno = hop - 1;
                         match _repeaters[repno].aux_forward(&drtioaux::Packet::DestinationStatusRequest {
-                            destination: _destination
-                        }) {
+                            destination: destination
+                        }, router, _routing_table, *rank, *self_destination) {
                             Ok(()) => (),
                             Err(drtioaux::Error::LinkDown) => drtioaux::send(0, &drtioaux::Packet::DestinationDownReply)?,
                             Err(e) => {
@@ -156,7 +214,6 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
                     }
                 }
             }
-
             Ok(())
         }
 
@@ -171,18 +228,18 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             drtioaux::send(0, &drtioaux::Packet::RoutingAck)
         }
         #[cfg(has_drtio_routing)]
-        drtioaux::Packet::RoutingSetRank { rank } => {
-            *_rank = rank;
-            drtio_routing::interconnect_enable_all(_routing_table, rank);
+        drtioaux::Packet::RoutingSetRank { rank: new_rank } => {
+            *rank = new_rank;
+            drtio_routing::interconnect_enable_all(_routing_table, new_rank);
 
-            let rep_rank = rank + 1;
+            let rep_rank = new_rank + 1;
             for rep in _repeaters.iter() {
                 if let Err(e) = rep.set_rank(rep_rank) {
                     error!("failed to set rank ({})", e);
                 }
             }
 
-            info!("rank: {}", rank);
+            info!("rank: {}", new_rank);
             info!("routing table: {}", _routing_table);
 
             drtioaux::send(0, &drtioaux::Packet::RoutingAck)
@@ -198,7 +255,7 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
         }
 
         drtioaux::Packet::MonitorRequest { destination: _destination, channel, probe } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let value;
             #[cfg(has_rtio_moninj)]
             unsafe {
@@ -215,7 +272,7 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             drtioaux::send(0, &reply)
         },
         drtioaux::Packet::InjectionRequest { destination: _destination, channel, overrd, value } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             #[cfg(has_rtio_moninj)]
             unsafe {
                 csr::rtio_moninj::inj_chan_sel_write(channel as _);
@@ -225,7 +282,7 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             Ok(())
         },
         drtioaux::Packet::InjectionStatusRequest { destination: _destination, channel, overrd } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let value;
             #[cfg(has_rtio_moninj)]
             unsafe {
@@ -241,22 +298,22 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
         },
 
         drtioaux::Packet::I2cStartRequest { destination: _destination, busno } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let succeeded = i2c::start(busno).is_ok();
             drtioaux::send(0, &drtioaux::Packet::I2cBasicReply { succeeded: succeeded })
         }
         drtioaux::Packet::I2cRestartRequest { destination: _destination, busno } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let succeeded = i2c::restart(busno).is_ok();
             drtioaux::send(0, &drtioaux::Packet::I2cBasicReply { succeeded: succeeded })
         }
         drtioaux::Packet::I2cStopRequest { destination: _destination, busno } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let succeeded = i2c::stop(busno).is_ok();
             drtioaux::send(0, &drtioaux::Packet::I2cBasicReply { succeeded: succeeded })
         }
         drtioaux::Packet::I2cWriteRequest { destination: _destination, busno, data } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             match i2c::write(busno, data) {
                 Ok(ack) => drtioaux::send(0,
                     &drtioaux::Packet::I2cWriteReply { succeeded: true, ack: ack }),
@@ -265,7 +322,7 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             }
         }
         drtioaux::Packet::I2cReadRequest { destination: _destination, busno, ack } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             match i2c::read(busno, ack) {
                 Ok(data) => drtioaux::send(0,
                     &drtioaux::Packet::I2cReadReply { succeeded: true, data: data }),
@@ -274,25 +331,25 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             }
         }
         drtioaux::Packet::I2cSwitchSelectRequest { destination: _destination, busno, address, mask } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let succeeded = i2c::switch_select(busno, address, mask).is_ok();
             drtioaux::send(0, &drtioaux::Packet::I2cBasicReply { succeeded: succeeded })
         }
 
         drtioaux::Packet::SpiSetConfigRequest { destination: _destination, busno, flags, length, div, cs } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let succeeded = spi::set_config(busno, flags, length, div, cs).is_ok();
             drtioaux::send(0,
                 &drtioaux::Packet::SpiBasicReply { succeeded: succeeded })
         },
         drtioaux::Packet::SpiWriteRequest { destination: _destination, busno, data } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             let succeeded = spi::write(busno, data).is_ok();
             drtioaux::send(0,
                 &drtioaux::Packet::SpiBasicReply { succeeded: succeeded })
         }
         drtioaux::Packet::SpiReadRequest { destination: _destination, busno } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
             match spi::read(busno) {
                 Ok(data) => drtioaux::send(0,
                     &drtioaux::Packet::SpiReadReply { succeeded: true, data: data }),
@@ -301,41 +358,141 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
             }
         }
 
-        drtioaux::Packet::JdacBasicRequest { destination: _destination, dacno: _dacno,
-                                             reqno: _reqno, param: _param } => {
-            forward!(_routing_table, _destination, *_rank, _repeaters, &packet);
-            #[cfg(has_ad9154)]
-            let (succeeded, retval) = {
-                #[cfg(rtio_frequency = "125.0")]
-                const LINERATE: u64 = 5_000_000_000;
-                #[cfg(rtio_frequency = "150.0")]
-                const LINERATE: u64 = 6_000_000_000;
-                match _reqno {
-                    jdac_common::INIT => (board_artiq::ad9154::setup(_dacno, LINERATE).is_ok(), 0),
-                    jdac_common::PRINT_STATUS => { board_artiq::ad9154::status(_dacno); (true, 0) },
-                    jdac_common::PRBS => (board_artiq::ad9154::prbs(_dacno).is_ok(), 0),
-                    jdac_common::STPL => (board_artiq::ad9154::stpl(_dacno, 4, 2).is_ok(), 0),
-                    jdac_common::SYSREF_DELAY_DAC => { board_artiq::hmc830_7043::hmc7043::sysref_delay_dac(_dacno, _param); (true, 0) },
-                    jdac_common::SYSREF_SLIP => { board_artiq::hmc830_7043::hmc7043::sysref_slip(); (true, 0) },
-                    jdac_common::SYNC => {
-                        match board_artiq::ad9154::sync(_dacno) {
-                            Ok(false) => (true, 0),
-                            Ok(true) => (true, 1),
-                            Err(e) => {
-                                error!("DAC sync failed: {}", e);
-                                (false, 0)
-                            }
-                        }
-                    },
-                    jdac_common::DDMTD_SYSREF_RAW => (true, jdac_common::measure_ddmdt_phase_raw() as u8),
-                    jdac_common::DDMTD_SYSREF => (true, jdac_common::measure_ddmdt_phase() as u8),
-                    _ => (false, 0)
-                }
-            };
-            #[cfg(not(has_ad9154))]
-            let (succeeded, retval) = (false, 0);
+        drtioaux::Packet::AnalyzerHeaderRequest { destination: _destination } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            let header = analyzer.get_header();
+            drtioaux::send(0, &drtioaux::Packet::AnalyzerHeader {
+                total_byte_count: header.total_byte_count,
+                sent_bytes: header.sent_bytes,
+                overflow_occurred: header.overflow,
+            })
+        }
+
+        drtioaux::Packet::AnalyzerDataRequest { destination: _destination } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            let mut data_slice: [u8; SAT_PAYLOAD_MAX_SIZE] = [0; SAT_PAYLOAD_MAX_SIZE];
+            let meta = analyzer.get_data(&mut data_slice);
+            drtioaux::send(0, &drtioaux::Packet::AnalyzerData {
+                last: meta.last,
+                length: meta.len,
+                data: data_slice,
+            })
+        }
+
+        drtioaux::Packet::DmaAddTraceRequest { source, destination, id, status, length, trace } => {
+            forward!(router, _routing_table, destination, *rank, *self_destination, _repeaters, &packet);
+            *self_destination = destination;
+            let succeeded = dmamgr.add(source, id, status, &trace, length as usize).is_ok();
+            router.send(drtioaux::Packet::DmaAddTraceReply { 
+                source: *self_destination, destination: source, id: id, succeeded: succeeded 
+            }, _routing_table, *rank, *self_destination)
+        }
+        drtioaux::Packet::DmaAddTraceReply { source, destination: _destination, id, succeeded } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            dmamgr.ack_upload(kernelmgr, source, id, succeeded, router, *rank, *self_destination, _routing_table);
+            Ok(())
+        }
+        drtioaux::Packet::DmaRemoveTraceRequest { source, destination: _destination, id } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            let succeeded = dmamgr.erase(source, id).is_ok();
+            router.send(drtioaux::Packet::DmaRemoveTraceReply { 
+                destination: source, succeeded: succeeded 
+            }, _routing_table, *rank, *self_destination)
+        }
+        drtioaux::Packet::DmaPlaybackRequest { source, destination: _destination, id, timestamp } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            // no DMA with a running kernel
+            let succeeded = !kernelmgr.is_running() && dmamgr.playback(source, id, timestamp).is_ok();
+            router.send(drtioaux::Packet::DmaPlaybackReply { 
+                destination: source, succeeded: succeeded
+            }, _routing_table, *rank, *self_destination)
+        }
+        drtioaux::Packet::DmaPlaybackReply { destination: _destination, succeeded } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            if !succeeded {
+                kernelmgr.ddma_nack();
+            }
+            Ok(())
+        }
+        drtioaux::Packet::DmaPlaybackStatus { source: _, destination: _destination, id, error, channel, timestamp } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            dmamgr.remote_finished(kernelmgr, id, error, channel, timestamp);
+            Ok(())
+        }
+
+        drtioaux::Packet::SubkernelAddDataRequest { destination, id, status, length, data } => {
+            forward!(router, _routing_table, destination, *rank, *self_destination, _repeaters, &packet);
+            *self_destination = destination;
+            let succeeded = kernelmgr.add(id, status, &data, length as usize).is_ok();
             drtioaux::send(0,
-                &drtioaux::Packet::JdacBasicReply { succeeded: succeeded, retval: retval })
+                &drtioaux::Packet::SubkernelAddDataReply { succeeded: succeeded })
+        }
+        drtioaux::Packet::SubkernelLoadRunRequest { source, destination: _destination, id, run } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            let mut succeeded = kernelmgr.load(id).is_ok();
+            // allow preloading a kernel with delayed run
+            if run {
+                if dmamgr.running() {
+                    // cannot run kernel while DDMA is running
+                    succeeded = false;
+                } else {
+                    succeeded |= kernelmgr.run(source, id).is_ok();
+                }
+            }
+            router.send(drtioaux::Packet::SubkernelLoadRunReply { 
+                    destination: source, succeeded: succeeded 
+                }, 
+            _routing_table, *rank, *self_destination)
+        }
+        drtioaux::Packet::SubkernelLoadRunReply { destination: _destination, succeeded } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            // received if local subkernel started another, remote subkernel
+            kernelmgr.subkernel_load_run_reply(succeeded, *self_destination);
+            Ok(())
+        }
+        drtioaux::Packet::SubkernelFinished { destination: _destination, id, with_exception, exception_src } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            kernelmgr.remote_subkernel_finished(id, with_exception, exception_src);
+            Ok(())
+        }
+        drtioaux::Packet::SubkernelExceptionRequest { source, destination: _destination } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            let mut data_slice: [u8; MASTER_PAYLOAD_MAX_SIZE] = [0; MASTER_PAYLOAD_MAX_SIZE];
+            let meta = kernelmgr.exception_get_slice(&mut data_slice);
+            router.send(drtioaux::Packet::SubkernelException {
+                destination: source,
+                last: meta.status.is_last(),
+                length: meta.len,
+                data: data_slice,
+            }, _routing_table, *rank, *self_destination)
+        }
+        drtioaux::Packet::SubkernelException { destination: _destination, last, length, data } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            kernelmgr.received_exception(&data[..length as usize], last, router, _routing_table, *rank, *self_destination);
+            Ok(())
+        }
+        drtioaux::Packet::SubkernelMessage { source, destination: _destination, id, status, length, data } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            kernelmgr.message_handle_incoming(status, length as usize, id, &data);
+            router.send(drtioaux::Packet::SubkernelMessageAck {
+                    destination: source
+                }, _routing_table, *rank, *self_destination)
+        }
+        drtioaux::Packet::SubkernelMessageAck { destination: _destination } => {
+            forward!(router, _routing_table, _destination, *rank, *self_destination, _repeaters, &packet);
+            if kernelmgr.message_ack_slice() {
+                let mut data_slice: [u8; MASTER_PAYLOAD_MAX_SIZE] = [0; MASTER_PAYLOAD_MAX_SIZE];
+                if let Some(meta) = kernelmgr.message_get_slice(&mut data_slice) {
+                    // route and not send immediately as ACKs are not a beginning of a transaction
+                    router.route(drtioaux::Packet::SubkernelMessage {
+                        source: *self_destination, destination: meta.destination, id: kernelmgr.get_current_id().unwrap(),
+                        status: meta.status, length: meta.len as u16, data: data_slice
+                    }, _routing_table, *rank, *self_destination);
+                } else {
+                    error!("Error receiving message slice");
+                }
+            }
+            Ok(())
         }
 
         _ => {
@@ -345,27 +502,26 @@ fn process_aux_packet(_repeaters: &mut [repeater::Repeater],
     }
 }
 
-fn process_aux_packets(repeaters: &mut [repeater::Repeater],
-        routing_table: &mut drtio_routing::RoutingTable, rank: &mut u8) {
+fn process_aux_packets(dma_manager: &mut DmaManager, analyzer: &mut Analyzer,
+        kernelmgr: &mut KernelManager, repeaters: &mut [repeater::Repeater],
+        routing_table: &mut drtio_routing::RoutingTable, rank: &mut u8, router: &mut routing::Router,
+        destination: &mut u8) {
     let result =
         drtioaux::recv(0).and_then(|packet| {
-            if let Some(packet) = packet {
-                process_aux_packet(repeaters, routing_table, rank, packet)
+            if let Some(packet) = packet.or_else(|| router.get_local_packet()) {
+                process_aux_packet(dma_manager, analyzer, kernelmgr, 
+                    repeaters, routing_table, rank, router, destination, packet)
             } else {
                 Ok(())
             }
         });
-    match result {
-        Ok(()) => (),
-        Err(e) => warn!("aux packet error ({})", e)
+    if let Err(e) = result {
+        warn!("aux packet error ({})", e);
     }
 }
 
 fn drtiosat_process_errors() {
-    let errors;
-    unsafe {
-        errors = csr::drtiosat::protocol_error_read();
-    }
+    let errors = unsafe { csr::drtiosat::protocol_error_read() };
     if errors & 1 != 0 {
         error!("received packet of an unknown type");
     }
@@ -373,26 +529,29 @@ fn drtiosat_process_errors() {
         error!("received truncated packet");
     }
     if errors & 4 != 0 {
-        let destination;
-        unsafe {
-            destination = csr::drtiosat::buffer_space_timeout_dest_read();
-        }
+        let destination = unsafe {
+            csr::drtiosat::buffer_space_timeout_dest_read()
+        };
         error!("timeout attempting to get buffer space from CRI, destination=0x{:02x}", destination)
     }
-    if errors & 8 != 0 {
-        let channel;
-        let timestamp_event;
-        let timestamp_counter;
-        unsafe {
-            channel = csr::drtiosat::underflow_channel_read();
-            timestamp_event = csr::drtiosat::underflow_timestamp_event_read() as i64;
-            timestamp_counter = csr::drtiosat::underflow_timestamp_counter_read() as i64;
+    let drtiosat_active = unsafe { csr::cri_con::selected_read() == 0 };
+    if drtiosat_active {
+        // RTIO errors are handled by ksupport and dma manager
+        if errors & 8 != 0 {
+            let channel;
+            let timestamp_event;
+            let timestamp_counter;
+            unsafe {
+                channel = csr::drtiosat::underflow_channel_read();
+                timestamp_event = csr::drtiosat::underflow_timestamp_event_read() as i64;
+                timestamp_counter = csr::drtiosat::underflow_timestamp_counter_read() as i64;
+            }
+            error!("write underflow, channel={}, timestamp={}, counter={}, slack={}",
+                channel, timestamp_event, timestamp_counter, timestamp_event-timestamp_counter);
         }
-        error!("write underflow, channel={}, timestamp={}, counter={}, slack={}",
-               channel, timestamp_event, timestamp_counter, timestamp_event-timestamp_counter);
-    }
-    if errors & 16 != 0 {
-        error!("write overflow");
+        if errors & 16 != 0 {
+            error!("write overflow");
+        }
     }
     unsafe {
         csr::drtiosat::protocol_error_write(errors);
@@ -424,19 +583,6 @@ fn hardware_tick(ts: &mut u64) {
     }
 }
 
-#[cfg(all(has_si5324, rtio_frequency = "150.0"))]
-const SI5324_SETTINGS: si5324::FrequencySettings
-    = si5324::FrequencySettings {
-    n1_hs  : 6,
-    nc1_ls : 6,
-    n2_hs  : 10,
-    n2_ls  : 270,
-    n31    : 75,
-    n32    : 75,
-    bwsel  : 4,
-    crystal_ref: true
-};
-
 #[cfg(all(has_si5324, rtio_frequency = "125.0"))]
 const SI5324_SETTINGS: si5324::FrequencySettings
     = si5324::FrequencySettings {
@@ -447,7 +593,7 @@ const SI5324_SETTINGS: si5324::FrequencySettings
     n31    : 63,
     n32    : 63,
     bwsel  : 4,
-    crystal_ref: true
+    crystal_as_ckin2: true
 };
 
 #[cfg(all(has_si5324, rtio_frequency = "100.0"))]
@@ -460,18 +606,81 @@ const SI5324_SETTINGS: si5324::FrequencySettings
     n31    : 50,
     n32    : 50,
     bwsel  : 4,
-    crystal_ref: true
+    crystal_as_ckin2: true
 };
+
+#[cfg(all(has_si549, rtio_frequency = "125.0"))]
+const SI549_SETTINGS: si549::FrequencySetting = si549::FrequencySetting {
+    main: si549::DividerConfig {
+        hsdiv: 0x058,
+        lsdiv: 0,
+        fbdiv: 0x04815791F25,
+    },
+    helper: si549::DividerConfig {
+        // 125MHz*32767/32768
+        hsdiv: 0x058,
+        lsdiv: 0,
+        fbdiv: 0x04814E8F442,
+    },
+};
+
+#[cfg(all(has_si549, rtio_frequency = "100.0"))]
+const SI549_SETTINGS: si549::FrequencySetting = si549::FrequencySetting {
+    main: si549::DividerConfig {
+        hsdiv: 0x06C,
+        lsdiv: 0,
+        fbdiv: 0x046C5F49797,
+    },
+    helper: si549::DividerConfig {
+        // 100MHz*32767/32768
+        hsdiv: 0x06C,
+        lsdiv: 0,
+        fbdiv: 0x046C5670BBD,
+    },
+};
+
+#[cfg(not(soc_platform = "efc"))]
+fn sysclk_setup() {
+    let switched = unsafe {
+        csr::crg::switch_done_read()
+    };
+    if switched == 1 {
+        info!("Clocking has already been set up.");
+        return;
+    }
+    else {
+        #[cfg(has_si5324)]
+        si5324::setup(&SI5324_SETTINGS, si5324::Input::Ckin1).expect("cannot initialize Si5324");
+        #[cfg(has_si549)]
+        si549::main_setup(&SI549_SETTINGS).expect("cannot initialize main Si549");
+
+        info!("Switching sys clock, rebooting...");
+        // delay for clean UART log, wait until UART FIFO is empty
+        clock::spin_us(3000);
+        unsafe {
+            csr::gt_drtio::stable_clkin_write(1);
+        }
+        loop {}
+    }
+}
+
 
 #[no_mangle]
 pub extern fn main() -> i32 {
     extern {
+        static mut _fheap: u8;
+        static mut _eheap: u8;
         static mut _sstack_guard: u8;
     }
 
     unsafe {
+        ALLOC.add_range(&mut _fheap, &mut _eheap);
         pmp::init_stack_guard(&_sstack_guard as *const u8 as usize);
     }
+    #[cfg(soc_platform = "kasli")]
+    irq::enable_interrupts();
+    #[cfg(has_wrpll)]
+    irq::enable(csr::WRPLL_INTERRUPT);
 
     clock::init();
     uart_logger::ConsoleLogger::register();
@@ -486,8 +695,8 @@ pub extern fn main() -> i32 {
     let (mut io_expander0, mut io_expander1);
     #[cfg(all(soc_platform = "kasli", hw_rev = "v2.0"))]
     {
-        io_expander0 = board_misoc::io_expander::IoExpander::new(0);
-        io_expander1 = board_misoc::io_expander::IoExpander::new(1);
+        io_expander0 = board_misoc::io_expander::IoExpander::new(0).unwrap();
+        io_expander1 = board_misoc::io_expander::IoExpander::new(1).unwrap();
         io_expander0.init().expect("I2C I/O expander #0 initialization failed");
         io_expander1.init().expect("I2C I/O expander #1 initialization failed");
 
@@ -504,29 +713,71 @@ pub extern fn main() -> i32 {
         io_expander1.service().unwrap();
     }
 
-    #[cfg(has_si5324)]
-    si5324::setup(&SI5324_SETTINGS, si5324::Input::Ckin1).expect("cannot initialize Si5324");
+    #[cfg(not(soc_platform = "efc"))]
+    sysclk_setup();
 
-    unsafe {
-        csr::drtio_transceiver::stable_clkin_write(1);
+    #[cfg(has_si549)]
+    si549::helper_setup(&SI549_SETTINGS).expect("cannot initialize helper Si549");    
+
+    #[cfg(soc_platform = "efc")]
+    let mut io_expander;
+    #[cfg(soc_platform = "efc")]
+    {
+        let p3v3_fmc_en_pin;
+        let vadj_fmc_en_pin;
+
+        #[cfg(hw_rev = "v1.0")]
+        {
+            p3v3_fmc_en_pin = 0;
+            vadj_fmc_en_pin = 1;
+        }
+        #[cfg(hw_rev = "v1.1")]
+        {
+            p3v3_fmc_en_pin = 1;
+            vadj_fmc_en_pin = 7;
+        }
+
+        io_expander = board_misoc::io_expander::IoExpander::new().unwrap();
+        io_expander.init().expect("I2C I/O expander initialization failed");
+
+        // Enable LEDs
+        io_expander.set_oe(0, 1 << 5 | 1 << 6 | 1 << 7).unwrap();
+        
+        // Enable VADJ and P3V3_FMC
+        io_expander.set_oe(1, 1 << p3v3_fmc_en_pin | 1 << vadj_fmc_en_pin).unwrap();
+
+        io_expander.set(1, p3v3_fmc_en_pin, true);
+        io_expander.set(1, vadj_fmc_en_pin, true);
+
+        io_expander.service().unwrap();
     }
-    clock::spin_us(1500); // wait for CPLL/QPLL lock
-    #[cfg(not(has_jdcg))]
+
+    #[cfg(not(has_drtio_eem))]
     unsafe {
-        csr::drtio_transceiver::txenable_write(0xffffffffu32 as _);
+        csr::gt_drtio::txenable_write(0xffffffffu32 as _);
     }
+
+    #[cfg(has_drtio_eem)]
+    unsafe {
+        csr::eem_transceiver::txenable_write(0xffffffffu32 as _);
+    }
+
     init_rtio_crg();
 
-    #[cfg(has_hmc830_7043)]
-    /* must be the first SPI init because of HMC830 SPI mode selection */
-    hmc830_7043::init().expect("cannot initialize HMC830/7043");
-    #[cfg(has_ad9154)]
-    {
-        jdac_common::init_ddmtd().expect("failed to initialize SYSREF DDMTD core");
-        for dacno in 0..csr::CONFIG_AD9154_COUNT {
-            board_artiq::ad9154::reset_and_detect(dacno as u8).expect("AD9154 DAC not detected");
+    config::read_str("sed_spread_enable", |r| {
+        match r {
+            Ok("1") => { info!("SED spreading enabled"); toggle_sed_spread(1); },
+            Ok("0") => { info!("SED spreading disabled"); toggle_sed_spread(0); },
+            Ok(_) => { 
+                warn!("sed_spread_enable value not supported (only 1, 0 allowed), disabling by default");
+                toggle_sed_spread(0);
+            },
+            Err(_) => { info!("SED spreading disabled by default"); toggle_sed_spread(0) },
         }
-    }
+    });
+
+    #[cfg(has_drtio_eem)]
+    drtio_eem::init();
 
     #[cfg(has_drtio_routing)]
     let mut repeaters = [repeater::Repeater::default(); csr::DRTIOREP.len()];
@@ -537,25 +788,28 @@ pub extern fn main() -> i32 {
     } 
     let mut routing_table = drtio_routing::RoutingTable::default_empty();
     let mut rank = 1;
+    let mut destination = 1;
 
     let mut hardware_tick_ts = 0;
 
+    #[cfg(soc_platform = "efc")]
+    ad9117::init().expect("AD9117 initialization failed");
+    
     loop {
-        #[cfg(has_jdcg)]
-        unsafe {
-            // Hide from uplink until RTM is ready
-            csr::drtio_transceiver::txenable_write(0xfffffffeu32 as _);
-        }
+        let mut router = routing::Router::new();
+
         while !drtiosat_link_rx_up() {
             drtiosat_process_errors();
             for rep in repeaters.iter_mut() {
-                rep.service(&routing_table, rank);
+                rep.service(&routing_table, rank, destination, &mut router);
             }
             #[cfg(all(soc_platform = "kasli", hw_rev = "v2.0"))]
             {
                 io_expander0.service().expect("I2C I/O expander #0 service failed");
                 io_expander1.service().expect("I2C I/O expander #1 service failed");
             }
+            #[cfg(soc_platform = "efc")]
+            io_expander.service().expect("I2C I/O expander service failed");
             hardware_tick(&mut hardware_tick_ts);
         }
 
@@ -566,38 +820,39 @@ pub extern fn main() -> i32 {
             si5324::siphaser::calibrate_skew().expect("failed to calibrate skew");
         }
 
+        #[cfg(has_wrpll)]
+        si549::wrpll::select_recovered_clock(true);
+
+        // various managers created here, so when link is dropped, DMA traces,
+        // analyzer logs, kernels are cleared and/or stopped for a clean slate
+        // on subsequent connections, without a manual intervention.
+        let mut dma_manager = DmaManager::new();
+        let mut analyzer = Analyzer::new();
+        let mut kernelmgr = KernelManager::new();
+
+        cricon_select(RtioMaster::Drtio);
         drtioaux::reset(0);
         drtiosat_reset(false);
         drtiosat_reset_phy(false);
 
-        #[cfg(has_jdcg)]
-        let mut was_up = false;
         while drtiosat_link_rx_up() {
             drtiosat_process_errors();
-            process_aux_packets(&mut repeaters, &mut routing_table, &mut rank);
+            process_aux_packets(&mut dma_manager, &mut analyzer, 
+                &mut kernelmgr, &mut repeaters, &mut routing_table,
+                &mut rank, &mut router, &mut destination);
             for rep in repeaters.iter_mut() {
-                rep.service(&routing_table, rank);
+                rep.service(&routing_table, rank, destination, &mut router);
             }
             #[cfg(all(soc_platform = "kasli", hw_rev = "v2.0"))]
             {
                 io_expander0.service().expect("I2C I/O expander #0 service failed");
                 io_expander1.service().expect("I2C I/O expander #1 service failed");
             }
+            #[cfg(soc_platform = "efc")]
+            io_expander.service().expect("I2C I/O expander service failed");
             hardware_tick(&mut hardware_tick_ts);
             if drtiosat_tsc_loaded() {
                 info!("TSC loaded from uplink");
-                #[cfg(has_jdcg)]
-                {
-                    // We assume that the RTM on repeater0 is up.
-                    // Uplink should not send a TSC load command unless the link is
-                    // up, and we are hiding when the RTM is down.
-                    if let Err(e) = jdcg::jesd204sync::sysref_rtio_align() {
-                        error!("failed to align SYSREF with TSC ({})", e);
-                    }
-                    if let Err(e) = jdcg::jesd204sync::resync_dacs() {
-                        error!("DAC resync failed after SYSREF/TSC realignment ({})", e);
-                    }
-                }
                 for rep in repeaters.iter() {
                     if let Err(e) = rep.sync_tsc() {
                         error!("failed to sync TSC ({})", e);
@@ -607,37 +862,27 @@ pub extern fn main() -> i32 {
                     error!("aux packet error: {}", e);
                 }
             }
-            #[cfg(has_jdcg)]
-            {
-                let is_up = repeaters[0].is_up();
-                if is_up && !was_up {
-                    /*
-                     * One side of the JESD204 elastic buffer is clocked by the jitter filter
-                     * (Si5324), the other by the RTM.
-                     * The elastic buffer can operate only when those two clocks are derived from
-                     * the same oscillator.
-                     * This is the case when either of those conditions is true:
-                     * (1) The DRTIO master and the RTM are clocked directly from a common external
-                     *     source, *and* the jitter filter has locked to the recovered clock.
-                     *     This clocking scheme may provide less noise and phase drift at the DACs.
-                     * (2) The RTM clock is connected to the jitter filter output.
-                     * To handle those cases, we simply keep the JESD204 core in reset unless the
-                     * jitter filter is locked to the recovered clock.
-                     */
-                    jdcg::jesd::reset(false);
-                    let _ = jdcg::jdac::init();
-                    jdcg::jesd204sync::sysref_auto_align();
-                    jdcg::jdac::stpl();
-                    unsafe {
-                        csr::drtio_transceiver::txenable_write(0xffffffffu32 as _);  // unhide
-                    }
+            if let Some(status) = dma_manager.get_status() {
+                info!("playback done, error: {}, channel: {}, timestamp: {}", status.error, status.channel, status.timestamp);
+                router.route(drtioaux::Packet::DmaPlaybackStatus { 
+                    source: destination, destination: status.source, id: status.id,
+                    error: status.error, channel: status.channel, timestamp: status.timestamp 
+                }, &routing_table, rank, destination);
+            }
+
+            kernelmgr.process_kern_requests(&mut router, &routing_table, rank, destination, &mut dma_manager);
+            
+            #[cfg(has_drtio_routing)]
+            if let Some((repno, packet)) = router.get_downstream_packet() {
+                if let Err(e) = repeaters[repno].aux_send(&packet) {
+                    warn!("[REP#{}] Error when sending packet to satellite ({:?})", repno, e)
                 }
-                was_up = is_up;
+            }
+
+            if let Some(packet) = router.get_upstream_packet() {
+                drtioaux::send(0, &packet).unwrap();
             }
         }
-
-        #[cfg(has_jdcg)]
-        jdcg::jesd::reset(true);
 
         drtiosat_reset_phy(true);
         drtiosat_reset(true);
@@ -645,30 +890,74 @@ pub extern fn main() -> i32 {
         info!("uplink is down, switching to local oscillator clock");
         #[cfg(has_si5324)]
         si5324::siphaser::select_recovered_clock(false).expect("failed to switch clocks");
+        #[cfg(has_wrpll)]
+        si549::wrpll::select_recovered_clock(false);
     }
+}
+
+#[cfg(soc_platform = "efc")]
+fn enable_error_led() {
+    let p3v3_fmc_en_pin;
+    let vadj_fmc_en_pin;
+
+    #[cfg(hw_rev = "v1.0")]
+    {
+        p3v3_fmc_en_pin = 0;
+        vadj_fmc_en_pin = 1;
+    }
+    #[cfg(hw_rev = "v1.1")]
+    {
+        p3v3_fmc_en_pin = 1;
+        vadj_fmc_en_pin = 7;
+    }
+
+    let mut io_expander = board_misoc::io_expander::IoExpander::new().unwrap();
+
+    // Keep LEDs enabled
+    io_expander.set_oe(0, 1 << 5 | 1 << 6 | 1 << 7).unwrap();
+    // Enable Error LED
+    io_expander.set(0, 7, true);
+
+    // Keep VADJ and P3V3_FMC enabled
+    io_expander.set_oe(1, 1 << p3v3_fmc_en_pin | 1 << vadj_fmc_en_pin).unwrap();
+
+    io_expander.set(1, p3v3_fmc_en_pin, true);
+    io_expander.set(1, vadj_fmc_en_pin, true);
+
+    io_expander.service().unwrap();
 }
 
 #[no_mangle]
 pub extern fn exception(_regs: *const u32) {
     let pc = mepc::read();
     let cause = mcause::read().cause();
-    
-    fn hexdump(addr: u32) {
-        let addr = (addr - addr % 4) as *const u32;
-        let mut ptr  = addr;
-        println!("@ {:08p}", ptr);
-        for _ in 0..4 {
-            print!("+{:04x}: ", ptr as usize - addr as usize);
-            print!("{:08x} ",   unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
-            print!("{:08x} ",   unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
-            print!("{:08x} ",   unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
-            print!("{:08x}\n",  unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
+    match cause {
+        mcause::Trap::Interrupt(_source) => {
+            #[cfg(has_wrpll)]
+            if irq::is_pending(csr::WRPLL_INTERRUPT) {
+                si549::wrpll::interrupt_handler();
+            }
+        },
+
+        mcause::Trap::Exception(e) => {
+            fn hexdump(addr: u32) {
+                let addr = (addr - addr % 4) as *const u32;
+                let mut ptr  = addr;
+                println!("@ {:08p}", ptr);
+                for _ in 0..4 {
+                    print!("+{:04x}: ", ptr as usize - addr as usize);
+                    print!("{:08x} ",   unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
+                    print!("{:08x} ",   unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
+                    print!("{:08x} ",   unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
+                    print!("{:08x}\n",  unsafe { *ptr }); ptr = ptr.wrapping_offset(1);
+                }
+            }
+
+            hexdump(u32::try_from(pc).unwrap());
+            let mtval = mtval::read();
+            panic!("exception {:?} at PC 0x{:x}, trap value 0x{:x}", e, u32::try_from(pc).unwrap(), mtval)
         }
     }
-
-    hexdump(u32::try_from(pc).unwrap());
-    let mtval = mtval::read();
-    panic!("exception {:?} at PC 0x{:x}, trap value 0x{:x}", cause, u32::try_from(pc).unwrap(), mtval)
 }
 
 #[no_mangle]
@@ -687,8 +976,16 @@ pub fn panic_fmt(info: &core::panic::PanicInfo) -> ! {
 
     if let Some(location) = info.location() {
         print!("panic at {}:{}:{}", location.file(), location.line(), location.column());
+        #[cfg(soc_platform = "efc")]
+        {
+            if location.file() != "libboard_misoc/io_expander.rs" {
+                enable_error_led();
+            }
+        }
     } else {
         print!("panic at unknown location");
+        #[cfg(soc_platform = "efc")]
+        enable_error_led();
     }
     if let Some(message) = info.message() {
         println!(": {}", message);

@@ -6,12 +6,26 @@ import os
 from artiq import __artiq_dir__ as artiq_dir
 from artiq.coredevice.runtime import source_loader
 
+"""
+This file provides class definition for all the exceptions declared in `EmbeddingMap` in `artiq.compiler.embedding`
 
-ZeroDivisionError = builtins.ZeroDivisionError
-ValueError = builtins.ValueError
-IndexError = builtins.IndexError
-RuntimeError = builtins.RuntimeError
+For Python builtin exceptions, use the `builtins` module
+For ARTIQ specific exceptions, inherit from `Exception` class
+"""
+
 AssertionError = builtins.AssertionError
+AttributeError = builtins.AttributeError
+IndexError = builtins.IndexError
+IOError = builtins.IOError
+KeyError = builtins.KeyError
+NotImplementedError = builtins.NotImplementedError
+OverflowError = builtins.OverflowError
+RuntimeError = builtins.RuntimeError
+TimeoutError = builtins.TimeoutError
+TypeError = builtins.TypeError
+ValueError = builtins.ValueError
+ZeroDivisionError = builtins.ZeroDivisionError
+OSError = builtins.OSError
 
 
 class CoreException:
@@ -137,7 +151,7 @@ class RTIOOverflow(Exception):
 
 
 class RTIODestinationUnreachable(Exception):
-    """Raised with a RTIO operation could not be completed due to a DRTIO link
+    """Raised when a RTIO operation could not be completed due to a DRTIO link
     being down.
     """
     artiq_builtin = True
@@ -148,15 +162,26 @@ class DMAError(Exception):
     artiq_builtin = True
 
 
+class SubkernelError(Exception):
+    """Raised when an operation regarding a subkernel is invalid 
+    or cannot be completed.
+    """
+    artiq_builtin = True
+
+
 class ClockFailure(Exception):
     """Raised when RTIO PLL has lost lock."""
-
+    artiq_builtin = True
 
 class I2CError(Exception):
     """Raised when a I2C transaction fails."""
-    pass
+    artiq_builtin = True
 
 
 class SPIError(Exception):
     """Raised when a SPI transaction fails."""
-    pass
+    artiq_builtin = True
+
+class UnwrapNoneError(Exception):
+    """Raised when unwrapping a none Option."""
+    artiq_builtin = True

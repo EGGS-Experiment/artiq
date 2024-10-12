@@ -7,11 +7,111 @@ import string
 from qasync import QEventLoop, QtWidgets, QtCore
 
 from sipyco.sync_struct import Subscriber, process_mod
+from sipyco.pc_rpc import AsyncioClient as RPCClient
 from sipyco import pyon
 from sipyco.pipe_ipc import AsyncioChildComm
 
+from artiq.language.scan import ScanObject
+
 
 logger = logging.getLogger(__name__)
+
+
+class _AppletRequestInterface:
+    def __init__(self):
+        raise NotImplementedError
+
+    def set_dataset(self, key, value, unit=None, scale=None, precision=None, persist=None):
+        """
+        Set a dataset.
+        See documentation of :meth:`~artiq.language.environment.HasEnvironment.set_dataset`.
+        """
+        raise NotImplementedError
+
+    def mutate_dataset(self, key, index, value):
+        """
+        Mutate a dataset.
+        See documentation of :meth:`~artiq.language.environment.HasEnvironment.mutate_dataset`.
+        """
+        raise NotImplementedError
+
+    def append_to_dataset(self, key, value):
+        """
+        Append to a dataset.
+        See documentation of :meth:`~artiq.language.environment.HasEnvironment.append_to_dataset`.
+        """
+        raise NotImplementedError
+
+    def set_argument_value(self, expurl, key, value):
+        """
+        Temporarily set the value of an argument in a experiment in the dashboard.
+        The value resets to default value when recomputing the argument.
+
+        :param expurl: Experiment URL identifying the experiment in the dashboard. Example: 'repo:ArgumentsDemo'.
+        :param key: Name of the argument in the experiment.
+        :param value: Object representing the new temporary value of the argument. For :class:`~artiq.language.scan.Scannable` arguments, 
+            this parameter should be a :class:`~artiq.language.scan.ScanObject`. The type of the :class:`~artiq.language.scan.ScanObject` 
+            will be set as the selected type when this function is called. 
+        """
+        raise NotImplementedError
+
+
+class AppletRequestIPC(_AppletRequestInterface):
+    def __init__(self, ipc):
+        self.ipc = ipc
+
+    def set_dataset(self, key, value, unit=None, scale=None, precision=None, persist=None):
+        metadata = {}
+        if unit is not None:
+            metadata["unit"] = unit
+        if scale is not None:
+            metadata["scale"] = scale
+        if precision is not None:
+            metadata["precision"] = precision
+        self.ipc.set_dataset(key, value, metadata, persist)
+
+    def mutate_dataset(self, key, index, value):
+        mod = {"action": "setitem", "path": [key, 1], "key": index, "value": value}
+        self.ipc.update_dataset(mod)
+
+    def append_to_dataset(self, key, value):
+        mod = {"action": "append", "path": [key, 1], "x": value}
+        self.ipc.update_dataset(mod)
+
+    def set_argument_value(self, expurl, key, value):
+        if isinstance(value, ScanObject):
+            value = value.describe()
+        self.ipc.set_argument_value(expurl, key, value)
+
+
+class AppletRequestRPC(_AppletRequestInterface):
+    def __init__(self, loop, dataset_ctl):
+        self.loop = loop
+        self.dataset_ctl = dataset_ctl
+        self.background_tasks = set()
+
+    def _background(self, coro, *args, **kwargs):
+        task = self.loop.create_task(coro(*args, **kwargs))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+
+    def set_dataset(self, key, value, unit=None, scale=None, precision=None, persist=None):
+        metadata = {}
+        if unit is not None:
+            metadata["unit"] = unit
+        if scale is not None:
+            metadata["scale"] = scale
+        if precision is not None:
+            metadata["precision"] = precision
+        self._background(self.dataset_ctl.set, key, value, metadata=metadata, persist=persist)
+
+    def mutate_dataset(self, key, index, value):
+        mod = {"action": "setitem", "path": [key, 1], "key": index, "value": value}
+        self._background(self.dataset_ctl.update, mod)
+
+    def append_to_dataset(self, key, value):
+        mod = {"action": "append", "path": [key, 1], "x": value}
+        self._background(self.dataset_ctl.update, mod)
 
 
 class AppletIPCClient(AsyncioChildComm):
@@ -64,13 +164,30 @@ class AppletIPCClient(AsyncioChildComm):
                              exc_info=True)
                 self.close_cb()
 
-    def subscribe(self, datasets, init_cb, mod_cb, dataset_prefixes=[]):
+    def subscribe(self, datasets, init_cb, mod_cb, dataset_prefixes=[], *, loop):
         self.write_pyon({"action": "subscribe",
                          "datasets": datasets,
                          "dataset_prefixes": dataset_prefixes})
         self.init_cb = init_cb
         self.mod_cb = mod_cb
-        asyncio.ensure_future(self.listen())
+        self.listen_task = loop.create_task(self.listen())
+
+    def set_dataset(self, key, value, metadata, persist=None):
+        self.write_pyon({"action": "set_dataset",
+                         "key": key,
+                         "value": value,
+                         "metadata": metadata,
+                         "persist": persist})
+
+    def update_dataset(self, mod):
+        self.write_pyon({"action": "update_dataset",
+                         "mod": mod})
+
+    def set_argument_value(self, expurl, key, value):
+        self.write_pyon({"action": "set_argument_value",
+                         "expurl": expurl,
+                         "key": key,
+                         "value": value})
 
 
 class SimpleApplet:
@@ -92,8 +209,11 @@ class SimpleApplet:
                  "for dataset notifications "
                  "(ignored in embedded mode)")
         group.add_argument(
-            "--port", default=3250, type=int,
-            help="TCP port to connect to")
+            "--port-notify", default=3250, type=int,
+            help="TCP port to connect to for notifications (ignored in embedded mode)")
+        group.add_argument(
+            "--port-control", default=3251, type=int,
+            help="TCP port to connect to for control (ignored in embedded mode)")
 
         self._arggroup_datasets = self.argparser.add_argument_group("datasets")
 
@@ -132,8 +252,21 @@ class SimpleApplet:
         if self.embed is not None:
             self.ipc.close()
 
+    def req_init(self):
+        if self.embed is None:
+            dataset_ctl = RPCClient()
+            self.loop.run_until_complete(dataset_ctl.connect_rpc(
+                self.args.server, self.args.port_control, "dataset_db"))
+            self.req = AppletRequestRPC(self.loop, dataset_ctl)
+        else:
+            self.req = AppletRequestIPC(self.ipc)
+
+    def req_close(self):
+        if self.embed is None:
+            self.req.dataset_ctl.close_rpc()
+
     def create_main_widget(self):
-        self.main_widget = self.main_widget_class(self.args)
+        self.main_widget = self.main_widget_class(self.args, self.req)
         if self.embed is not None:
             self.ipc.set_close_cb(self.main_widget.close)
             if os.name == "nt":
@@ -189,7 +322,12 @@ class SimpleApplet:
             return False
 
     def emit_data_changed(self, data, mod_buffer):
-        self.main_widget.data_changed(data, mod_buffer)
+        persist = dict()
+        value = dict()
+        metadata = dict()
+        for k, d in data.items():
+            persist[k], value[k], metadata[k] = d
+        self.main_widget.data_changed(value, metadata, persist, mod_buffer)
 
     def flush_mod_buffer(self):
         self.emit_data_changed(self.data, self.mod_buffer)
@@ -204,8 +342,8 @@ class SimpleApplet:
                 self.mod_buffer.append(mod)
             else:
                 self.mod_buffer = [mod]
-                asyncio.get_event_loop().call_later(self.args.update_delay,
-                                                    self.flush_mod_buffer)
+                self.loop.call_later(self.args.update_delay,
+                                     self.flush_mod_buffer)
         else:
             self.emit_data_changed(self.data, [mod])
 
@@ -214,10 +352,11 @@ class SimpleApplet:
             self.subscriber = Subscriber("datasets",
                                          self.sub_init, self.sub_mod)
             self.loop.run_until_complete(self.subscriber.connect(
-                self.args.server, self.args.port))
+                self.args.server, self.args.port_notify))
         else:
             self.ipc.subscribe(self.datasets, self.sub_init, self.sub_mod,
-                               dataset_prefixes=self.dataset_prefixes)
+                               dataset_prefixes=self.dataset_prefixes,
+                               loop=self.loop)
 
     def unsubscribe(self):
         if self.embed is None:
@@ -229,12 +368,16 @@ class SimpleApplet:
         try:
             self.ipc_init()
             try:
-                self.create_main_widget()
-                self.subscribe()
+                self.req_init()
                 try:
-                    self.loop.run_forever()
+                    self.create_main_widget()
+                    self.subscribe()
+                    try:
+                        self.loop.run_forever()
+                    finally:
+                        self.unsubscribe()
                 finally:
-                    self.unsubscribe()
+                    self.req_close()
             finally:
                 self.ipc_close()
         finally:
@@ -273,4 +416,9 @@ class TitleApplet(SimpleApplet):
                 title = self.args.title
         else:
             title = None
-        self.main_widget.data_changed(data, mod_buffer, title)
+        persist = dict()
+        value = dict()
+        metadata = dict()
+        for k, d in data.items():
+            persist[k], value[k], metadata[k] = d
+        self.main_widget.data_changed(value, metadata, persist, mod_buffer, title)

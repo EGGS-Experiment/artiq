@@ -91,11 +91,12 @@ class Target:
 
     tool_ld = "ld.lld"
     tool_strip = "llvm-strip"
-    tool_addr2line = "llvm-addr2line"
+    tool_symbolizer = "llvm-symbolizer"
     tool_cxxfilt = "llvm-cxxfilt"
 
-    def __init__(self):
+    def __init__(self, subkernel_id=None):
         self.llcontext = ll.Context()
+        self.subkernel_id = subkernel_id
 
     def target_machine(self):
         lltarget = llvm.Target.from_triple(self.triple)
@@ -148,7 +149,8 @@ class Target:
             ir.BasicBlock._dump_loc = False
 
         type_printer = types.TypePrinter()
-        _dump(os.getenv("ARTIQ_DUMP_IR"), "ARTIQ IR", ".txt",
+        suffix = "_subkernel_{}".format(self.subkernel_id) if self.subkernel_id is not None else ""
+        _dump(os.getenv("ARTIQ_DUMP_IR"), "ARTIQ IR", suffix + ".txt",
               lambda: "\n".join(fn.as_entity(type_printer) for fn in module.artiq_ir))
 
         llmod = module.build_llvm_ir(self)
@@ -160,12 +162,12 @@ class Target:
             _dump("", "LLVM IR (broken)", ".ll", lambda: str(llmod))
             raise
 
-        _dump(os.getenv("ARTIQ_DUMP_UNOPT_LLVM"), "LLVM IR (generated)", "_unopt.ll",
+        _dump(os.getenv("ARTIQ_DUMP_UNOPT_LLVM"), "LLVM IR (generated)", suffix + "_unopt.ll",
               lambda: str(llparsedmod))
 
         self.optimize(llparsedmod)
 
-        _dump(os.getenv("ARTIQ_DUMP_LLVM"), "LLVM IR (optimized)", ".ll",
+        _dump(os.getenv("ARTIQ_DUMP_LLVM"), "LLVM IR (optimized)", suffix + ".ll",
               lambda: str(llparsedmod))
 
         return llparsedmod
@@ -218,8 +220,8 @@ class Target:
         # the backtrace entry should point at.
         last_inlined = None
         offset_addresses = [hex(addr - 1) for addr in addresses]
-        with RunTool([self.tool_addr2line, "--addresses",  "--functions", "--inlines",
-                      "--demangle", "--exe={library}"] + offset_addresses,
+        with RunTool([self.tool_symbolizer, "--addresses",  "--functions", "--inlines",
+                      "--demangle", "--output-style=GNU", "--exe={library}"] + offset_addresses,
                      library=library) \
                 as results:
             lines = iter(results["__stdout__"].read().rstrip().split("\n"))
@@ -256,6 +258,8 @@ class Target:
             return backtrace
 
     def demangle(self, names):
+        if not any(names):
+            return names
         with RunTool([self.tool_cxxfilt] + names) as results:
             return results["__stdout__"].read().rstrip().split("\n")
 
@@ -269,37 +273,37 @@ class RV32IMATarget(Target):
     triple = "riscv32-unknown-linux"
     data_layout = "e-m:e-p:32:32-i64:64-n32-S128"
     features = ["m", "a"]
-    additional_linker_options = []
+    additional_linker_options = ["-m", "elf32lriscv"]
     print_function = "core_log"
     now_pinning = True
 
     tool_ld = "ld.lld"
     tool_strip = "llvm-strip"
-    tool_addr2line = "llvm-addr2line"
+    tool_symbolizer = "llvm-symbolizer"
     tool_cxxfilt = "llvm-cxxfilt"
 
 class RV32GTarget(Target):
     triple = "riscv32-unknown-linux"
     data_layout = "e-m:e-p:32:32-i64:64-n32-S128"
     features = ["m", "a", "f", "d"]
-    additional_linker_options = []
+    additional_linker_options = ["-m", "elf32lriscv"]
     print_function = "core_log"
     now_pinning = True
 
     tool_ld = "ld.lld"
     tool_strip = "llvm-strip"
-    tool_addr2line = "llvm-addr2line"
+    tool_symbolizer = "llvm-symbolizer"
     tool_cxxfilt = "llvm-cxxfilt"
 
 class CortexA9Target(Target):
     triple = "armv7-unknown-linux-gnueabihf"
     data_layout = "e-m:e-p:32:32-i64:64-v128:64:128-a:0:32-n32-S64"
     features = ["dsp", "fp16", "neon", "vfp3"]
-    additional_linker_options = ["--target2=rel"]
+    additional_linker_options = ["-m", "armelf_linux_eabi", "--target2=rel"]
     print_function = "core_log"
     now_pinning = False
 
     tool_ld = "ld.lld"
     tool_strip = "llvm-strip"
-    tool_addr2line = "llvm-addr2line"
+    tool_symbolizer = "llvm-symbolizer"
     tool_cxxfilt = "llvm-cxxfilt"

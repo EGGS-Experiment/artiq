@@ -4,6 +4,7 @@
 
 import argparse
 import sys
+import tarfile
 from operator import itemgetter
 import logging
 from collections import defaultdict
@@ -12,7 +13,7 @@ import h5py
 
 from llvmlite import binding as llvm
 
-from sipyco import common_args
+from sipyco import common_args, pyon
 
 from artiq import __version__ as artiq_version
 from artiq.language.environment import EnvExperiment, ProcessArgumentManager
@@ -86,6 +87,20 @@ class LLVMBitcodeRunner(FileRunner):
         return self.target.link([self.target.assemble(llmodule)])
 
 
+class TARRunner(FileRunner):
+    def compile(self):
+        with tarfile.open(self.file, "r:") as tar:
+            for entry in tar:
+                if entry.name == 'main.elf':
+                    main_lib = tar.extractfile(entry).read()
+                else:
+                    subkernel_name = entry.name.removesuffix(".elf")
+                    sid, dest = tuple(map(lambda x: int(x), subkernel_name.split(" ")))
+                    subkernel_lib = tar.extractfile(entry).read()
+                    self.core.comm.upload_subkernel(subkernel_lib, sid, dest)
+        return main_lib
+
+
 class DummyScheduler:
     def __init__(self):
         self.rid = 0
@@ -134,7 +149,7 @@ def get_argparser(with_file=True):
     common_args.verbosity_args(parser)
     parser.add_argument("--device-db", default="device_db.py",
                         help="device database file (default: '%(default)s')")
-    parser.add_argument("--dataset-db", default="dataset_db.pyon",
+    parser.add_argument("--dataset-db", default="dataset_db.mdb",
                         help="dataset file (default: '%(default)s')")
 
     parser.add_argument("-c", "--class-name", default=None,
@@ -151,11 +166,33 @@ def get_argparser(with_file=True):
     return parser
 
 
+class ArgumentManager(ProcessArgumentManager):
+    def get_interactive(self, interactive_arglist, title):
+        print(title)
+        result = dict()
+        for key, processor, group, tooltip in interactive_arglist:
+            success = False
+            while not success:
+                user_input = input("{}:{} (group={}, tooltip={}): ".format(
+                    key, type(processor).__name__, group, tooltip))
+                try:
+                    user_input_deser = pyon.decode(user_input)
+                    value = processor.process(user_input_deser)
+                except:
+                    logger.error("failed to process user input, retrying",
+                                 exc_info=True)
+                else:
+                    success = True
+            result[key] = value
+        return result
+
+
 def _build_experiment(device_mgr, dataset_mgr, args):
     arguments = parse_arguments(args.arguments)
-    argument_mgr = ProcessArgumentManager(arguments)
+    argument_mgr = ArgumentManager(arguments)
     managers = (device_mgr, dataset_mgr, argument_mgr, {})
     if hasattr(args, "file"):
+        is_tar = tarfile.is_tarfile(args.file)
         is_elf = args.file.endswith(".elf")
         is_ll  = args.file.endswith(".ll")
         is_bc  = args.file.endswith(".bc")
@@ -165,7 +202,9 @@ def _build_experiment(device_mgr, dataset_mgr, args):
             if args.class_name:
                 raise ValueError("class-name not supported "
                                  "for precompiled kernels")
-        if is_elf:
+        if is_tar:
+            return TARRunner(managers, file=args.file)
+        elif is_elf:
             return ELFRunner(managers, file=args.file)
         elif is_ll:
             return LLVMIRRunner(managers, file=args.file)
@@ -184,7 +223,9 @@ def _build_experiment(device_mgr, dataset_mgr, args):
         "arguments": arguments
     }
     device_mgr.virtual_devices["scheduler"].expid = expid
-    return get_experiment(module, args.class_name)(managers)
+    exp_inst = get_experiment(module, args.class_name)(managers)
+    argument_mgr.check_unprocessed_arguments()
+    return exp_inst
 
 
 def run(with_file=False):
@@ -195,29 +236,33 @@ def run(with_file=False):
                                virtual_devices={"scheduler": DummyScheduler(),
                                                 "ccb": DummyCCB()})
     dataset_db = DatasetDB(args.dataset_db)
-    dataset_mgr = DatasetManager(dataset_db)
-
     try:
-        exp_inst = _build_experiment(device_mgr, dataset_mgr, args)
-        exp_inst.prepare()
-        exp_inst.run()
-        exp_inst.analyze()
-    except CompileError as error:
-        return
-    except Exception as exn:
-        if hasattr(exn, "artiq_core_exception"):
-            print(exn.artiq_core_exception, file=sys.stderr)
-        raise exn
-    finally:
-        device_mgr.close_devices()
+        dataset_mgr = DatasetManager(dataset_db)
 
-    if args.hdf5 is not None:
-        with h5py.File(args.hdf5, "w") as f:
-            dataset_mgr.write_hdf5(f)
-    else:
-        for k, v in sorted(dataset_mgr.local.items(), key=itemgetter(0)):
-            print("{}: {}".format(k, v))
-    dataset_db.save()
+        try:
+            exp_inst = _build_experiment(device_mgr, dataset_mgr, args)
+            exp_inst.prepare()
+            exp_inst.run()
+            device_mgr.notify_run_end()
+            exp_inst.analyze()
+        except CompileError as error:
+            return
+        except Exception as exn:
+            if hasattr(exn, "artiq_core_exception"):
+                print(exn.artiq_core_exception, file=sys.stderr)
+            raise exn
+        finally:
+            device_mgr.close_devices()
+
+        if args.hdf5 is not None:
+            with h5py.File(args.hdf5, "w") as f:
+                dataset_mgr.write_hdf5(f)
+        else:
+            for k, v in sorted(dataset_mgr.local.items(), key=itemgetter(0)):
+                print("{}: {}".format(k, v))
+        dataset_db.save()
+    finally:
+        dataset_db.close_db()
 
 
 def main():

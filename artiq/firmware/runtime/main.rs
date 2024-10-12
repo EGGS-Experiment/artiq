@@ -1,6 +1,7 @@
-#![feature(lang_items, panic_info_message)]
+#![feature(lang_items, panic_info_message, const_btree_new, iter_advance_by, never_type)]
 #![no_std]
 
+extern crate dyld;
 extern crate eh;
 #[macro_use]
 extern crate alloc;
@@ -24,23 +25,35 @@ extern crate board_artiq;
 extern crate logger_artiq;
 extern crate proto_artiq;
 extern crate riscv;
+#[cfg(has_drtio)]
+extern crate tar_no_std;
 
+use alloc::collections::BTreeMap;
 use core::cell::RefCell;
 use core::convert::TryFrom;
-use smoltcp::wire::IpCidr;
+use smoltcp::wire::HardwareAddress;
 
 use board_misoc::{csr, ident, clock, spiflash, config, net_settings, pmp, boot};
 #[cfg(has_ethmac)]
 use board_misoc::ethmac;
+#[cfg(soc_platform = "kasli")]
+use board_misoc::irq;
+use board_misoc::net_settings::{Ipv4AddrConfig};
 #[cfg(has_drtio)]
 use board_artiq::drtioaux;
 use board_artiq::drtio_routing;
 use board_artiq::{mailbox, rpc_queue};
 use proto_artiq::{mgmt_proto, moninj_proto, rpc_proto, session_proto, kernel_proto};
+#[cfg(has_wrpll)]
+use board_artiq::si549;
+#[cfg(has_drtio_eem)]
+use board_artiq::drtio_eem;
 #[cfg(has_rtio_analyzer)]
 use proto_artiq::analyzer_proto;
 
 use riscv::register::{mcause, mepc, mtval};
+use smoltcp::iface::Routes;
+use ip_addr_storage::InterfaceBuilderEx;
 
 mod rtio_clocking;
 mod rtio_mgt;
@@ -58,6 +71,8 @@ mod session;
 mod moninj;
 #[cfg(has_rtio_analyzer)]
 mod analyzer;
+mod dhcp;
+mod ip_addr_storage;
 
 #[cfg(has_grabber)]
 fn grabber_thread(io: sched::Io) {
@@ -100,8 +115,8 @@ fn startup() {
     let (mut io_expander0, mut io_expander1);
     #[cfg(all(soc_platform = "kasli", hw_rev = "v2.0"))]
     {
-        io_expander0 = board_misoc::io_expander::IoExpander::new(0);
-        io_expander1 = board_misoc::io_expander::IoExpander::new(1);
+        io_expander0 = board_misoc::io_expander::IoExpander::new(0).unwrap();
+        io_expander1 = board_misoc::io_expander::IoExpander::new(1).unwrap();
         io_expander0.init().expect("I2C I/O expander #0 initialization failed");
         io_expander1.init().expect("I2C I/O expander #1 initialization failed");
 
@@ -119,58 +134,53 @@ fn startup() {
     }
     rtio_clocking::init();
 
+    #[cfg(has_drtio_eem)]
+    drtio_eem::init();
+
     let mut net_device = unsafe { ethmac::EthernetDevice::new() };
     net_device.reset_phy_if_any();
 
     let net_device = {
-        use smoltcp::time::Instant;
-        use smoltcp::wire::PrettyPrinter;
-        use smoltcp::wire::EthernetFrame;
+        use smoltcp::phy::Tracer;
 
-        fn net_trace_writer(timestamp: Instant, printer: PrettyPrinter<EthernetFrame<&[u8]>>) {
-            print!("\x1b[37m[{:6}.{:03}s]\n{}\x1b[0m\n",
-                   timestamp.secs(), timestamp.millis(), printer)
-        }
-
-        fn net_trace_silent(_timestamp: Instant, _printer: PrettyPrinter<EthernetFrame<&[u8]>>) {}
-
-        let net_trace_fn: fn(Instant, PrettyPrinter<EthernetFrame<&[u8]>>);
+        // We can't create the function pointer as a separate variable here because the type of
+        // the packet argument Packet isn't accessible and rust's type inference isn't sufficient
+        // to propagate in to a local var.
         match config::read_str("net_trace", |r| r.map(|s| s == "1")) {
-            Ok(true) => net_trace_fn = net_trace_writer,
-            _ => net_trace_fn = net_trace_silent
+            Ok(true) => Tracer::new(net_device, |timestamp, packet| {
+                print!("\x1b[37m[{:6}.{:03}s]\n{}\x1b[0m\n",
+                       timestamp.secs(), timestamp.millis(), packet)
+            }),
+            _ => Tracer::new(net_device, |_, _| {}),
         }
-        smoltcp::phy::EthernetTracer::new(net_device, net_trace_fn)
     };
 
     let neighbor_cache =
         smoltcp::iface::NeighborCache::new(alloc::collections::btree_map::BTreeMap::new());
     let net_addresses = net_settings::get_adresses();
     info!("network addresses: {}", net_addresses);
-    let mut interface = match net_addresses.ipv6_addr {
-        Some(addr) => {
-            let ip_addrs = [
-                IpCidr::new(net_addresses.ipv4_addr, 0),
-                IpCidr::new(net_addresses.ipv6_ll_addr, 0),
-                IpCidr::new(addr, 0)
-            ];
-            smoltcp::iface::EthernetInterfaceBuilder::new(net_device)
-                       .ethernet_addr(net_addresses.hardware_addr)
-                       .ip_addrs(ip_addrs)
-                       .neighbor_cache(neighbor_cache)
-                       .finalize()
-        }
-        None => {
-            let ip_addrs = [
-                IpCidr::new(net_addresses.ipv4_addr, 0),
-                IpCidr::new(net_addresses.ipv6_ll_addr, 0)
-            ];
-            smoltcp::iface::EthernetInterfaceBuilder::new(net_device)
-                       .ethernet_addr(net_addresses.hardware_addr)
-                       .ip_addrs(ip_addrs)
-                       .neighbor_cache(neighbor_cache)
-                       .finalize()
-        }
+    let use_dhcp = if matches!(net_addresses.ipv4_addr, Ipv4AddrConfig::UseDhcp) {
+        info!("Will try to acquire an IPv4 address with DHCP");
+        true
+    } else {
+        false
     };
+    let mut interface = smoltcp::iface::InterfaceBuilder::new(net_device, vec![])
+        .hardware_addr(HardwareAddress::Ethernet(net_addresses.hardware_addr))
+        .init_ip_addrs(&net_addresses)
+        .neighbor_cache(neighbor_cache)
+        .routes(Routes::new(BTreeMap::new()))
+        .finalize();
+
+    if !use_dhcp {
+        if let Some(ipv4_default_route) = net_addresses.ipv4_default_route {
+            interface.routes_mut().add_default_ipv4_route(ipv4_default_route).unwrap();
+        }
+    }
+
+    if let Some(ipv6_default_route) = net_addresses.ipv6_default_route {
+        interface.routes_mut().add_default_ipv6_route(ipv6_default_route).unwrap();
+    }
 
     #[cfg(has_drtio)]
     let drtio_routing_table = urc::Urc::new(RefCell::new(
@@ -184,26 +194,44 @@ fn startup() {
     drtio_routing::interconnect_disable_all();
     let aux_mutex = sched::Mutex::new();
 
-    let mut scheduler = sched::Scheduler::new();
+    let ddma_mutex = sched::Mutex::new();
+    let subkernel_mutex = sched::Mutex::new();
+
+    let mut scheduler = sched::Scheduler::new(interface);
     let io = scheduler.io();
 
-    rtio_mgt::startup(&io, &aux_mutex, &drtio_routing_table, &up_destinations);
+    if use_dhcp {
+        io.spawn(4096, dhcp::dhcp_thread);
+    }
+
+    rtio_mgt::startup(&io, &aux_mutex, &drtio_routing_table, &up_destinations, &ddma_mutex, &subkernel_mutex);
 
     io.spawn(4096, mgmt::thread);
     {
         let aux_mutex = aux_mutex.clone();
         let drtio_routing_table = drtio_routing_table.clone();
         let up_destinations = up_destinations.clone();
-        io.spawn(16384, move |io| { session::thread(io, &aux_mutex, &drtio_routing_table, &up_destinations) });
+        let ddma_mutex = ddma_mutex.clone();
+        let subkernel_mutex = subkernel_mutex.clone();
+        io.spawn(32768, move |io| { session::thread(io, &aux_mutex, &drtio_routing_table, &up_destinations, &ddma_mutex, &subkernel_mutex) });
     }
     #[cfg(any(has_rtio_moninj, has_drtio))]
     {
         let aux_mutex = aux_mutex.clone();
+        let ddma_mutex = ddma_mutex.clone();
+        let subkernel_mutex = subkernel_mutex.clone();
         let drtio_routing_table = drtio_routing_table.clone();
-        io.spawn(4096, move |io| { moninj::thread(io, &aux_mutex, &drtio_routing_table) });
+        io.spawn(4096, move |io| { moninj::thread(io, &aux_mutex, &ddma_mutex, &subkernel_mutex, &drtio_routing_table) });
     }
     #[cfg(has_rtio_analyzer)]
-    io.spawn(4096, analyzer::thread);
+    {
+        let aux_mutex = aux_mutex.clone();
+        let ddma_mutex = ddma_mutex.clone();
+        let subkernel_mutex = subkernel_mutex.clone();
+        let drtio_routing_table = drtio_routing_table.clone();
+        let up_destinations = up_destinations.clone();
+        io.spawn(8192, move |io| { analyzer::thread(io, &aux_mutex, &ddma_mutex, &subkernel_mutex, &drtio_routing_table, &up_destinations) });
+    }
 
     #[cfg(has_grabber)]
     io.spawn(4096, grabber_thread);
@@ -211,19 +239,7 @@ fn startup() {
     let mut net_stats = ethmac::EthernetStatistics::new();
     loop {
         scheduler.run();
-
-        {
-            let sockets = &mut *scheduler.sockets().borrow_mut();
-            loop {
-                let timestamp = smoltcp::time::Instant::from_millis(clock::get_ms() as i64);
-                match interface.poll(sockets, timestamp) {
-                    Ok(true) => (),
-                    Ok(false) => break,
-                    Err(smoltcp::Error::Unrecognized) => (),
-                    Err(err) => debug!("network error: {}", err)
-                }
-            }
-        }
+        scheduler.run_network();
 
         if let Some(_net_stats_diff) = net_stats.update() {
             debug!("ethernet mac:{}", ethmac::EthernetStatistics::new());
@@ -252,6 +268,11 @@ pub extern fn main() -> i32 {
         ALLOC.add_range(&mut _fheap, &mut _eheap);
 
         pmp::init_stack_guard(&_sstack_guard as *const u8 as usize);
+
+        #[cfg(soc_platform = "kasli")]
+        irq::enable_interrupts();
+        #[cfg(has_wrpll)]
+        irq::enable(csr::WRPLL_INTERRUPT);
 
         logger_artiq::BufferLogger::new(&mut LOG_BUFFER[..]).register(||
             boot::start_user(startup as usize)
@@ -287,8 +308,11 @@ pub extern fn exception(regs: *const TrapFrame) {
     let pc = mepc::read();
     let cause = mcause::read().cause();
     match cause {
-        mcause::Trap::Interrupt(source) => {
-            info!("Called interrupt with {:?}", source);
+        mcause::Trap::Interrupt(_source) => {
+            #[cfg(has_wrpll)]
+            if irq::is_pending(csr::WRPLL_INTERRUPT) {
+                si549::wrpll::interrupt_handler();
+            }
         },
 
         mcause::Trap::Exception(mcause::Exception::UserEnvCall) => {
@@ -364,7 +388,7 @@ pub fn panic_impl(info: &core::panic::PanicInfo) -> ! {
     });
 
     if config::read_str("panic_reset", |r| r == Ok("1")) && 
-        cfg!(any(soc_platform = "kasli", soc_platform = "metlino", soc_platform = "kc705")) {
+        cfg!(any(soc_platform = "kasli", soc_platform = "kc705")) {
         println!("restarting...");
         unsafe {
             kernel::stop();

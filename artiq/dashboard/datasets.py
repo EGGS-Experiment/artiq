@@ -5,101 +5,26 @@ import numpy as np
 from PyQt5 import QtCore, QtWidgets
 from sipyco import pyon
 
-from artiq.tools import short_format, exc_to_warning
+from artiq.tools import scale_from_metadata, short_format, exc_to_warning
 from artiq.gui.tools import LayoutWidget, QRecursiveFilterProxyModel
 from artiq.gui.models import DictSyncTreeSepModel
-from artiq.gui.scientific_spinbox import ScientificSpinBox
 
 
 logger = logging.getLogger(__name__)
 
 
-async def rename(key, newkey, value, dataset_ctl):
-    if key != newkey:
+async def rename(key, new_key, value, metadata, persist, dataset_ctl):
+    if key != new_key:
         await dataset_ctl.delete(key)
-    await dataset_ctl.set(newkey, value)
+    await dataset_ctl.set(new_key, value, metadata=metadata, persist=persist)
 
 
-class Editor(QtWidgets.QDialog):
-    def __init__(self, parent, dataset_ctl, key, value):
-        QtWidgets.QDialog.__init__(self, parent=parent)
-        self.dataset_ctl = dataset_ctl
-        self.key = key
-        self.initial_type = type(value)
-
-        self.setWindowTitle("Edit dataset")
-        grid = QtWidgets.QGridLayout()
-        self.setLayout(grid)
-
-        grid.addWidget(QtWidgets.QLabel("Name:"), 0, 0)
-
-        self.name_widget = QtWidgets.QLineEdit()
-        self.name_widget.setText(key)
-
-        grid.addWidget(self.name_widget, 0, 1)
-
-        grid.addWidget(QtWidgets.QLabel("Value:"), 1, 0)
-        grid.addWidget(self.get_edit_widget(value), 1, 1)
-
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
-        grid.setRowStretch(2, 1)
-        grid.addWidget(buttons, 3, 0, 1, 2)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-
-    def accept(self):
-        newkey = self.name_widget.text()
-        value = self.initial_type(self.get_edit_widget_value())
-        asyncio.ensure_future(rename(self.key, newkey, value, self.dataset_ctl))
-        QtWidgets.QDialog.accept(self)
-
-    def get_edit_widget(self, initial_value):
-        raise NotImplementedError
-
-    def get_edit_widget_value(self):
-        raise NotImplementedError
-
-
-class NumberEditor(Editor):
-    def get_edit_widget(self, initial_value):
-        self.edit_widget = ScientificSpinBox()
-        self.edit_widget.setDecimals(13)
-        self.edit_widget.setPrecision()
-        self.edit_widget.setRelativeStep()
-        self.edit_widget.setValue(float(initial_value))
-        return self.edit_widget
-
-    def get_edit_widget_value(self):
-        return self.edit_widget.value()
-
-
-class BoolEditor(Editor):
-    def get_edit_widget(self, initial_value):
-        self.edit_widget = QtWidgets.QCheckBox()
-        self.edit_widget.setChecked(bool(initial_value))
-        return self.edit_widget
-
-    def get_edit_widget_value(self):
-        return self.edit_widget.isChecked()
-
-
-class StringEditor(Editor):
-    def get_edit_widget(self, initial_value):
-        self.edit_widget = QtWidgets.QLineEdit()
-        self.edit_widget.setText(initial_value)
-        return self.edit_widget
-
-    def get_edit_widget_value(self):
-        return self.edit_widget.text()
-
-
-class Creator(QtWidgets.QDialog):
-    def __init__(self, parent, dataset_ctl):
+class CreateEditDialog(QtWidgets.QDialog):
+    def __init__(self, parent, dataset_ctl, key=None, value=None, metadata=None, persist=False):
         QtWidgets.QDialog.__init__(self, parent=parent)
         self.dataset_ctl = dataset_ctl
 
-        self.setWindowTitle("Create dataset")
+        self.setWindowTitle("Create dataset" if key is None else "Edit dataset")
         grid = QtWidgets.QGridLayout()
         grid.setRowMinimumHeight(1, 40)
         grid.setColumnMinimumWidth(2, 60)
@@ -117,9 +42,21 @@ class Creator(QtWidgets.QDialog):
         grid.addWidget(self.data_type, 1, 2)
         self.value_widget.textChanged.connect(self.dtype)
 
-        grid.addWidget(QtWidgets.QLabel("Persist:"), 2, 0)
+        grid.addWidget(QtWidgets.QLabel("Unit:"), 2, 0)
+        self.unit_widget = QtWidgets.QLineEdit()
+        grid.addWidget(self.unit_widget, 2, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Scale:"), 3, 0)
+        self.scale_widget = QtWidgets.QLineEdit()
+        grid.addWidget(self.scale_widget, 3, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Precision:"), 4, 0)
+        self.precision_widget = QtWidgets.QLineEdit()
+        grid.addWidget(self.precision_widget, 4, 1)
+
+        grid.addWidget(QtWidgets.QLabel("Persist:"), 5, 0)
         self.box_widget = QtWidgets.QCheckBox()
-        grid.addWidget(self.box_widget, 2, 1)
+        grid.addWidget(self.box_widget, 5, 1)
 
         self.ok = QtWidgets.QPushButton('&Ok')
         self.ok.setEnabled(False)
@@ -129,23 +66,63 @@ class Creator(QtWidgets.QDialog):
             self.ok, QtWidgets.QDialogButtonBox.AcceptRole)
         self.buttons.addButton(
             self.cancel, QtWidgets.QDialogButtonBox.RejectRole)
-        grid.setRowStretch(3, 1)
-        grid.addWidget(self.buttons, 4, 0, 1, 3)
+        grid.setRowStretch(6, 1)
+        grid.addWidget(self.buttons, 7, 0, 1, 3, alignment=QtCore.Qt.AlignHCenter)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
+
+        self.key = key
+        self.name_widget.setText(key)
+
+        value_edit_string = self.value_to_edit_string(value)
+        if metadata is not None:
+            scale = scale_from_metadata(metadata)
+            t = value.dtype if value is np.ndarray else type(value)
+            if scale != 1 and np.issubdtype(t, np.number):
+                # degenerates to float type
+                value_edit_string = self.value_to_edit_string(value / scale)
+            self.unit_widget.setText(metadata.get('unit', ''))
+            self.scale_widget.setText(str(metadata.get('scale', '')))
+            self.precision_widget.setText(str(metadata.get('precision', '')))
+
+        self.value_widget.setText(value_edit_string)
+        self.box_widget.setChecked(persist)
 
     def accept(self):
         key = self.name_widget.text()
         value = self.value_widget.text()
         persist = self.box_widget.isChecked()
-        asyncio.ensure_future(exc_to_warning(self.dataset_ctl.set(
-            key, pyon.decode(value), persist)))
+        unit = self.unit_widget.text()
+        scale = self.scale_widget.text()
+        precision = self.precision_widget.text()
+        metadata = {}
+        if unit != "":
+            metadata['unit'] = unit
+        if scale != "":
+            metadata['scale'] = float(scale)
+        if precision != "":
+            metadata['precision'] = int(precision)
+        scale = scale_from_metadata(metadata)
+        value = self.parse_edit_string(value)
+        t = value.dtype if value is np.ndarray else type(value)
+        if scale != 1 and np.issubdtype(t, np.number):
+            # degenerates to float type
+            value = float(value * scale)
+        if self.key and self.key != key:
+            asyncio.ensure_future(exc_to_warning(rename(self.key, key, value, metadata, persist,
+                                                        self.dataset_ctl)))
+        else:
+            asyncio.ensure_future(exc_to_warning(self.dataset_ctl.set(key, value, metadata=metadata,
+                                                                      persist=persist)))
+        self.key = key
         QtWidgets.QDialog.accept(self)
 
     def dtype(self):
         txt = self.value_widget.text()
         try:
-            result = pyon.decode(txt)
+            result = self.parse_edit_string(txt)
+            # ensure only pyon compatible types are permissable
+            pyon.encode(result)
         except:
             pixmap = self.style().standardPixmap(
                 QtWidgets.QStyle.SP_MessageBoxWarning)
@@ -155,9 +132,38 @@ class Creator(QtWidgets.QDialog):
             self.data_type.setText(type(result).__name__)
             self.ok.setEnabled(True)
 
+    @staticmethod
+    def parse_edit_string(s):
+        if s == "":
+            raise TypeError
+        _eval_dict = {
+            "__builtins__": {},
+            "array": np.array,
+            "null": np.nan,
+            "inf": np.inf
+        }
+        for t_ in pyon._numpy_scalar:
+            _eval_dict[t_] = eval("np.{}".format(t_), {"np": np})
+        return eval(s, _eval_dict, {})
+
+    @staticmethod
+    def value_to_edit_string(v):
+        t = type(v)
+        r = ""
+        if isinstance(v, np.generic):
+            r += t.__name__
+            r += "("
+            r += repr(v)
+            r += ")"
+        elif v is None:
+            return r
+        else:
+            r += repr(v)
+        return r
+
 
 class Model(DictSyncTreeSepModel):
-    def __init__(self,  init):
+    def __init__(self, init):
         DictSyncTreeSepModel.__init__(self, ".",
                                       ["Dataset", "Persistent", "Value"],
                                       init)
@@ -166,13 +172,13 @@ class Model(DictSyncTreeSepModel):
         if column == 1:
             return "Y" if v[0] else "N"
         elif column == 2:
-            return short_format(v[1])
+            return short_format(v[1], v[2])
         else:
             raise ValueError
 
 
 class DatasetsDock(QtWidgets.QDockWidget):
-    def __init__(self, datasets_sub, dataset_ctl):
+    def __init__(self, dataset_sub, dataset_ctl):
         QtWidgets.QDockWidget.__init__(self, "Datasets")
         self.setObjectName("Datasets")
         self.setFeatures(QtWidgets.QDockWidget.DockWidgetMovable |
@@ -212,7 +218,7 @@ class DatasetsDock(QtWidgets.QDockWidget):
         self.table.addAction(delete_action)
 
         self.table_model = Model(dict())
-        datasets_sub.add_setmodel_callback(self.set_model)
+        dataset_sub.add_setmodel_callback(self.set_model)
 
     def _search_datasets(self):
         if hasattr(self, "table_model_filter"):
@@ -226,7 +232,7 @@ class DatasetsDock(QtWidgets.QDockWidget):
         self.table.setModel(self.table_model_filter)
 
     def create_clicked(self):
-        Creator(self, self.dataset_ctl).open()
+        CreateEditDialog(self, self.dataset_ctl).open()
 
     def edit_clicked(self):
         idx = self.table.selectedIndexes()
@@ -234,19 +240,8 @@ class DatasetsDock(QtWidgets.QDockWidget):
             idx = self.table_model_filter.mapToSource(idx[0])
             key = self.table_model.index_to_key(idx)
             if key is not None:
-                persist, value = self.table_model.backing_store[key]
-                t = type(value)
-                if np.issubdtype(t, np.number):
-                    dialog_cls = NumberEditor
-                elif np.issubdtype(t, np.bool_):
-                    dialog_cls = BoolEditor
-                elif np.issubdtype(t, np.unicode_):
-                    dialog_cls = StringEditor
-                else:
-                    logger.error("Cannot edit dataset %s: "
-                                 "type %s is not supported", key, t)
-                    return
-                dialog_cls(self, self.dataset_ctl, key, value).open()
+                persist, value, metadata = self.table_model.backing_store[key]
+                CreateEditDialog(self, self.dataset_ctl, key, value, metadata, persist).open()
 
     def delete_clicked(self):
         idx = self.table.selectedIndexes()

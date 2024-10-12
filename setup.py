@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from setuptools import setup, find_packages
+from setuptools import setup, find_namespace_packages
 import sys
 
 import versioneer
@@ -13,9 +13,9 @@ if sys.version_info[:2] < (3, 7):
 # Depends on PyQt5, but setuptools cannot check for it.
 requirements = [
     "numpy", "scipy",
-    "python-dateutil", "prettytable", "h5py",
+    "python-dateutil", "prettytable", "h5py", "lmdb",
     "qasync", "pyqtgraph", "pygit2",
-    "llvmlite", "pythonparser", "python-Levenshtein",
+    "llvmlite", "pythonparser", "levenshtein",
 ]
 
 console_scripts = [
@@ -23,6 +23,7 @@ console_scripts = [
     "artiq_compile = artiq.frontend.artiq_compile:main",
     "artiq_coreanalyzer = artiq.frontend.artiq_coreanalyzer:main",
     "artiq_coremgmt = artiq.frontend.artiq_coremgmt:main",
+    "artiq_rtiomap = artiq.frontend.artiq_rtiomap:main",
     "artiq_ddb_template = artiq.frontend.artiq_ddb_template:main",
     "artiq_master = artiq.frontend.artiq_master:main",
     "artiq_mkfs = artiq.frontend.artiq_mkfs:main",
@@ -32,6 +33,7 @@ console_scripts = [
     "artiq_route = artiq.frontend.artiq_route:main",
     "artiq_run = artiq.frontend.artiq_run:main",
     "artiq_flash = artiq.frontend.artiq_flash:main",
+    "aqctl_coreanalyzer_proxy = artiq.frontend.aqctl_coreanalyzer_proxy:main",
     "aqctl_corelog = artiq.frontend.aqctl_corelog:main",
     "aqctl_moninj_proxy = artiq.frontend.aqctl_moninj_proxy:main",
     "afws_client = artiq.frontend.afws_client:main",
@@ -66,7 +68,7 @@ Topic :: System :: Hardware
 """.splitlines(),
     install_requires=requirements,
     extras_require={},
-    packages=find_packages(),
+    packages=find_namespace_packages(exclude=["artiq.test.lit", "artiq.test.lit.*", "doc.manual"], ),
     namespace_packages=[],
     include_package_data=True,
     ext_modules=[],

@@ -11,10 +11,12 @@ class GTXInit(Module):
     # Choose between Auto Mode and Manual Mode for TX/RX phase alignment with buffer bypassed:
     # * Auto Mode: When only single lane is involved, as suggested by Xilinx (AR59612)
     # * Manual Mode: When only multi-lane is involved, as suggested by Xilinx (AR59612)
-    def __init__(self, sys_clk_freq, rx, mode="single"):
+    def __init__(self, clk_freq, rx, mode="single"):
         assert isinstance(rx, bool)
         assert mode in ["single", "master", "slave"]
         self.mode = mode
+
+        self.clk_path_ready = Signal()
 
         self.done = Signal()
         self.restart = Signal()
@@ -83,13 +85,13 @@ class GTXInit(Module):
 
         # After configuration, transceiver resets have to stay low for
         # at least 500ns (see AR43482)
-        startup_cycles = ceil(500*sys_clk_freq/1000000000)
+        startup_cycles = ceil(500*clk_freq/1000000000)
         startup_timer = WaitTimer(startup_cycles)
         self.submodules += startup_timer
 
         # PLL reset should be 1 period of refclk
         # (i.e. 1/(125MHz) for the case of RTIO @ 125MHz)
-        pll_reset_cycles = ceil(sys_clk_freq/125e6)
+        pll_reset_cycles = ceil(clk_freq/125e6)
         pll_reset_timer = WaitTimer(pll_reset_cycles)
         self.submodules += pll_reset_timer
 
@@ -108,9 +110,9 @@ class GTXInit(Module):
 
         startup_fsm.act("INITIAL",
             startup_timer.wait.eq(1),
-            If(startup_timer.done, NextState("RESET_ALL"))
+            If(startup_timer.done & self.clk_path_ready, NextState("RESET_PLL"))
         )
-        startup_fsm.act("RESET_ALL",
+        startup_fsm.act("RESET_PLL",
             gtXxreset.eq(1),
             self.cpllreset.eq(1),
             pll_reset_timer.wait.eq(1),
@@ -118,19 +120,24 @@ class GTXInit(Module):
         )
         startup_fsm.act("RELEASE_PLL_RESET",
             gtXxreset.eq(1),
-            If(cplllock, NextState("RELEASE_GTH_RESET"))
+            If(cplllock, NextState("RESET_GTX"))
+        )
+        startup_fsm.act("RESET_GTX",
+            gtXxreset.eq(1),
+            pll_reset_timer.wait.eq(1),
+            If(pll_reset_timer.done, NextState("RELEASE_GTX_RESET"))
         )
         # Release GTX reset and wait for GTX resetdone
         # (from UG476, GTX is reset on falling edge
         # of gttxreset)
         if rx:
-            startup_fsm.act("RELEASE_GTH_RESET",
+            startup_fsm.act("RELEASE_GTX_RESET",
                 Xxuserrdy.eq(1),
                 cdr_stable_timer.wait.eq(1),
                 If(Xxresetdone & cdr_stable_timer.done, NextState("DELAY_ALIGN"))
             )
         else:
-            startup_fsm.act("RELEASE_GTH_RESET",
+            startup_fsm.act("RELEASE_GTX_RESET",
                 Xxuserrdy.eq(1),
                 If(Xxresetdone, NextState("DELAY_ALIGN"))
             )
@@ -227,7 +234,7 @@ class GTXInit(Module):
         startup_fsm.act("READY",
             Xxuserrdy.eq(1),
             self.done.eq(1),
-            If(self.restart, NextState("RESET_ALL"))
+            If(self.restart, NextState("RESET_GTX"))
         )
 
 

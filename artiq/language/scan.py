@@ -1,20 +1,6 @@
 """
 Implementation and management of scan objects.
 
-A scan object (e.g. :class:`artiq.language.scan.RangeScan`) represents a
-one-dimensional sweep of a numerical range. Multi-dimensional scans are
-constructed by combining several scan objects, for example using
-:class:`artiq.language.scan.MultiScanManager`.
-
-Iterate on a scan object to scan it, e.g. ::
-
-    for variable in self.scan:
-        do_something(variable)
-
-Iterating multiple times on the same scan object is possible, with the scan
-yielding the same values each time. Iterating concurrently on the
-same scan object (e.g. via nested loops) is also supported, and the
-iterators are independent from each other.
 """
 
 import random
@@ -32,6 +18,21 @@ __all__ = ["ScanObject",
 
 
 class ScanObject:
+    """
+    Represents a one-dimensional sweep of a numerical range. Multi-dimensional scans are
+    constructed by combining several scan objects, for example using
+    :class:`MultiScanManager`.
+
+    Iterate on a scan object to scan it, e.g. ::
+
+        for variable in self.scan:
+            do_something(variable)
+
+    Iterating multiple times on the same scan object is possible, with the scan
+    yielding the same values each time. Iterating concurrently on the
+    same scan object (e.g. via nested loops) is also supported, and the
+    iterators are independent from each other.
+    """
     def __iter__(self):
         raise NotImplementedError
 
@@ -83,8 +84,7 @@ class RangeScan(ScanObject):
             self.sequence = [i*dx + start for i in range(npoints)]
 
         if randomize:
-            rng = random.Random(seed)
-            random.shuffle(self.sequence, rng.random)
+            random.Random(seed).shuffle(self.sequence)
 
     def __iter__(self):
         return iter(self.sequence)
@@ -120,8 +120,7 @@ class CenterScan(ScanObject):
                              for i in range(n) for sign in [-1, 1]][1:]
 
         if randomize:
-            rng = random.Random(seed)
-            random.shuffle(self.sequence, rng.random)
+            random.Random(seed).shuffle(self.sequence)
 
     def __iter__(self):
         return iter(self.sequence)
@@ -254,7 +253,7 @@ class Scannable:
     takes a scan object.
 
     When ``scale`` is not specified, and the unit is a common one (i.e.
-    defined in ``artiq.language.units``), then the scale is obtained from
+    defined in :class:`artiq.language.units`), then the scale is obtained from
     the unit using a simple string match. For example, milliseconds (``"ms"``)
     units set the scale to 0.001. No unit (default) corresponds to a scale of
     1.0.
@@ -280,11 +279,14 @@ class Scannable:
     :param unit: A string representing the unit of the scanned variable.
     :param scale: A numerical scaling factor by which the displayed values
         are multiplied when referenced in the experiment.
-    :param ndecimals: The number of decimals a UI should use.
+    :param precision: The maximum number of decimals a UI should use.
     """
-    def __init__(self, default=NoDefault, unit="", scale=None,
+    def __init__(self, default=NoDefault, unit="", *, scale=None,
                  global_step=None, global_min=None, global_max=None,
-                 ndecimals=2):
+                 precision=2, ndecimals=None):
+        if ndecimals is not None:
+            print("DeprecationWarning: 'ndecimals' is deprecated. Please use 'precision' instead.")
+            precision = ndecimals
         if scale is None:
             if unit == "":
                 scale = 1.0
@@ -305,7 +307,7 @@ class Scannable:
         self.global_step = global_step
         self.global_min = global_min
         self.global_max = global_max
-        self.ndecimals = ndecimals
+        self.precision = precision
 
     def default(self):
         if not hasattr(self, "default_values"):
@@ -330,7 +332,7 @@ class Scannable:
         d["global_step"] = self.global_step
         d["global_min"] = self.global_min
         d["global_max"] = self.global_max
-        d["ndecimals"] = self.ndecimals
+        d["precision"] = self.precision
         return d
 
 

@@ -5,7 +5,7 @@
   :target: https://m-labs.hk/artiq
 
 ARTIQ (Advanced Real-Time Infrastructure for Quantum physics) is a leading-edge control and data acquisition system for quantum information experiments.
-It is maintained and developed by `M-Labs <https://m-labs.hk>`_ and the initial development was for and in partnership with the `Ion Storage Group at NIST <https://www.nist.gov/pml/time-and-frequency-division/ion-storage>`_. ARTIQ is free software and offered to the entire research community as a solution equally applicable to other challenging control tasks, including outside the field of ion trapping. Many laboratories around the world have adopted ARTIQ as their control system, with over a hundred Sinara hardware crates deployed, and some have `contributed <https://m-labs.hk/experiment-control/funding/>`_ to it.
+It is maintained and developed by `M-Labs <https://m-labs.hk>`_ and the initial development was for and in partnership with the `Ion Storage Group at NIST <https://www.nist.gov/pml/time-and-frequency-division/ion-storage>`_. ARTIQ is free software and offered to the entire research community as a solution equally applicable to other challenging control tasks, including outside the field of ion trapping. Many laboratories around the world have adopted ARTIQ as their control system and some have `contributed <https://m-labs.hk/experiment-control/funding/>`_ to it.
 
 The system features a high-level programming language that helps describing complex experiments, which is compiled and executed on dedicated hardware with nanosecond timing resolution and sub-microsecond latency. It includes graphical user interfaces to parametrize and schedule experiments and to visualize and explore the results.
 
@@ -13,7 +13,7 @@ ARTIQ uses FPGA hardware to perform its time-critical tasks. The `Sinara hardwar
 ARTIQ is designed to be portable to hardware platforms from different vendors and FPGA manufacturers.
 Several different configurations of a `FPGA evaluation kit <https://www.xilinx.com/products/boards-and-kits/ek-k7-kc705-g.html>`_ and of a `Zynq evaluation kit <https://www.xilinx.com/products/boards-and-kits/ek-z7-zc706-g.html>`_ are also used and supported. FPGA platforms can be combined with any number of additional peripherals, either already accessible from ARTIQ or made accessible with little effort.
 
-ARTIQ and its dependencies are available in the form of Nix packages (for Linux) and Conda packages (for Windows and Linux). See `the manual <https://m-labs.hk/experiment-control/resources/>`_ for installation instructions.
+ARTIQ and its dependencies are available in the form of Nix packages (for Linux) and MSYS2 packages (for Windows). See `the manual <https://m-labs.hk/experiment-control/resources/>`_ for installation instructions.
 Packages containing pre-compiled binary images to be loaded onto the hardware platforms are supplied for each configuration.
 Like any open source software ARTIQ can equally be built and installed directly from `source <https://github.com/m-labs/artiq>`_.
 
@@ -29,7 +29,7 @@ Website: https://m-labs.hk/artiq
 License
 =======
 
-Copyright (C) 2014-2022 M-Labs Limited.
+Copyright (C) 2014-2024 M-Labs Limited.
 
 ARTIQ is free software: you can redistribute it and/or modify
 it under the terms of the GNU Lesser General Public License as published by

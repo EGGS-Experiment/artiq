@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 
 from migen import *
+from migen.genlib.cdc import MultiReg
 from migen.genlib.resetsync import AsyncResetSynchronizer
-from migen.genlib.cdc import PulseSynchronizer
 from misoc.interconnect.csr import *
 
 from artiq.gateware.rtio import cri, rtlink
@@ -28,13 +28,13 @@ class ChannelInterface:
 
 
 class TransceiverInterface(AutoCSR):
-    def __init__(self, channel_interfaces):
+    def __init__(self, channel_interfaces, *, async_rx=True):
         self.stable_clkin = CSRStorage()
         self.txenable = CSRStorage(len(channel_interfaces))
-        self.clock_domains.cd_rtio = ClockDomain()
-        for i in range(len(channel_interfaces)):
-            name = "rtio_rx" + str(i)
-            setattr(self.clock_domains, "cd_"+name, ClockDomain(name=name))
+        if async_rx:
+            for i in range(len(channel_interfaces)):
+                name = "rtio_rx" + str(i)
+                setattr(self.clock_domains, "cd_"+name, ClockDomain(name=name))
         self.channels = channel_interfaces
 
 
@@ -52,6 +52,7 @@ class SyncRTIO(Module):
     def __init__(self, tsc, channels, lane_count=8, fifo_depth=128):
         self.cri = cri.Interface()
         self.async_errors = Record(async_errors_layout)
+        self.sed_spread_enable = Signal()
 
         chan_fine_ts_width = max(max(rtlink.get_fine_ts_width(channel.interface.o)
                                      for channel in channels),
@@ -60,15 +61,16 @@ class SyncRTIO(Module):
         assert tsc.glbl_fine_ts_width >= chan_fine_ts_width
 
         self.submodules.outputs = ClockDomainsRenamer("rio")(
-            SED(channels, tsc.glbl_fine_ts_width, "sync",
+            SED(channels, tsc.glbl_fine_ts_width,
                 lane_count=lane_count, fifo_depth=fifo_depth,
-                enable_spread=False, report_buffer_space=True,
+                fifo_high_watermark=0.75, report_buffer_space=True,
                 interface=self.cri))
         self.comb += self.outputs.coarse_timestamp.eq(tsc.coarse_ts)
-        self.sync.rtio += self.outputs.minimum_coarse_timestamp.eq(tsc.coarse_ts + 16)
+        self.sync += self.outputs.minimum_coarse_timestamp.eq(tsc.coarse_ts + 16)
+        self.specials += MultiReg(self.sed_spread_enable, self.outputs.enable_spread, "rio")
 
         self.submodules.inputs = ClockDomainsRenamer("rio")(
-            InputCollector(tsc, channels, "sync", interface=self.cri))
+            InputCollector(tsc, channels, interface=self.cri))
 
         for attr, _ in async_errors_layout:
             self.comb += getattr(self.async_errors, attr).eq(getattr(self.outputs, attr))
@@ -79,15 +81,16 @@ class DRTIOSatellite(Module):
         self.reset = CSRStorage(reset=1)
         self.reset_phy = CSRStorage(reset=1)
         self.tsc_loaded = CSR()
-        # master interface in the rtio domain
+        self.sed_spread_enable = CSRStorage()
+        # master interface in the sys domain
         self.cri = cri.Interface()
         self.async_errors = Record(async_errors_layout)
 
         self.clock_domains.cd_rio = ClockDomain()
         self.clock_domains.cd_rio_phy = ClockDomain()
         self.comb += [
-            self.cd_rio.clk.eq(ClockSignal("rtio")),
-            self.cd_rio_phy.clk.eq(ClockSignal("rtio"))
+            self.cd_rio.clk.eq(ClockSignal("sys")),
+            self.cd_rio_phy.clk.eq(ClockSignal("sys"))
         ]
         reset = Signal()
         reset_phy = Signal()
@@ -125,9 +128,9 @@ class DRTIOSatellite(Module):
             rx_rt_frame_perm=rx_synchronizer.resync(self.link_layer.rx_rt_frame_perm),
             rx_rt_data=rx_synchronizer.resync(self.link_layer.rx_rt_data)
         )
-        self.submodules.link_stats = link_layer.LinkLayerStats(link_layer_sync, "rtio")
-        self.submodules.rt_packet = ClockDomainsRenamer("rtio")(
-            rt_packet_satellite.RTPacketSatellite(link_layer_sync, interface=self.cri))
+        self.submodules.link_stats = link_layer.LinkLayerStats(link_layer_sync, "sys")
+        self.submodules.rt_packet = rt_packet_satellite.RTPacketSatellite(
+            link_layer_sync, interface=self.cri)
         self.comb += self.rt_packet.reset.eq(self.cd_rio.rst)
 
         self.comb += [
@@ -135,19 +138,16 @@ class DRTIOSatellite(Module):
             tsc.load_value.eq(self.rt_packet.tsc_load_value)
         ]
 
-        ps_tsc_load = PulseSynchronizer("rtio", "sys")
-        self.submodules += ps_tsc_load
-        self.comb += ps_tsc_load.i.eq(self.rt_packet.tsc_load)
         self.sync += [
             If(self.tsc_loaded.re, self.tsc_loaded.w.eq(0)),
-            If(ps_tsc_load.o, self.tsc_loaded.w.eq(1))
+            If(self.rt_packet.tsc_load, self.tsc_loaded.w.eq(1)),
         ]
 
         self.submodules.rt_errors = rt_errors_satellite.RTErrorsSatellite(
             self.rt_packet, tsc, self.async_errors)
 
     def get_csrs(self):
-        return ([self.reset, self.reset_phy, self.tsc_loaded] +
+        return ([self.reset, self.sed_spread_enable, self.reset_phy, self.tsc_loaded] +
                 self.link_layer.get_csrs() + self.link_stats.get_csrs() +
                 self.rt_errors.get_csrs())
 

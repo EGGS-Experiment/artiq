@@ -11,7 +11,7 @@ from artiq.coredevice import urukul
 
 class AD9912:
     """
-    AD9912 DDS channel on Urukul
+    AD9912 DDS channel on Urukul.
 
     This class supports a single DDS channel and exposes the DDS,
     the digital step attenuator, and the RF switch.
@@ -22,15 +22,17 @@ class AD9912:
     :param sw_device: Name of the RF switch device. The RF switch is a
         TTLOut channel available as the :attr:`sw` attribute of this instance.
     :param pll_n: DDS PLL multiplier. The DDS sample clock is
-        f_ref/clk_div*pll_n where f_ref is the reference frequency and clk_div
-        is the reference clock divider (both set in the parent Urukul CPLD
-        instance).
+        ``f_ref / clk_div * pll_n`` where ``f_ref`` is the reference frequency and 
+        ``clk_div`` is the reference clock divider (both set in the parent 
+        Urukul CPLD instance).
+    :param pll_en: PLL enable bit, set to 0 to bypass PLL (default: 1).
+        Note that when bypassing the PLL the red front panel LED may remain on.
     """
 
     def __init__(self, dmgr, chip_select, cpld_device, sw_device=None,
-                 pll_n=10):
+                 pll_n=10, pll_en=1):
         self.kernel_invariants = {"cpld", "core", "bus", "chip_select",
-                                  "pll_n", "ftw_per_hz"}
+                                  "pll_n", "pll_en", "ftw_per_hz"}
         self.cpld = dmgr.get(cpld_device)
         self.core = self.cpld.core
         self.bus = self.cpld.bus
@@ -39,8 +41,16 @@ class AD9912:
         if sw_device:
             self.sw = dmgr.get(sw_device)
             self.kernel_invariants.add("sw")
+        self.pll_en = pll_en
         self.pll_n = pll_n
-        sysclk = self.cpld.refclk / [1, 1, 2, 4][self.cpld.clk_div] * pll_n
+        if pll_en:
+            refclk = self.cpld.refclk
+            if refclk < 11e6:
+                # use SYSCLK PLL Doubler
+                refclk = refclk * 2
+            sysclk = refclk / [1, 1, 2, 4][self.cpld.clk_div] * pll_n
+        else:
+            sysclk = self.cpld.refclk
         assert sysclk <= 1e9
         self.ftw_per_hz = 1 / sysclk * (int64(1) << 48)
 
@@ -91,7 +101,7 @@ class AD9912:
 
         Sets up SPI mode, confirms chip presence, powers down unused blocks,
         and configures the PLL. Does not wait for PLL lock. Uses the
-        IO_UPDATE signal multiple times.
+        ``IO_UPDATE`` signal multiple times.
         """
         # SPI mode
         self.write(AD9912_SER_CONF, 0x99, length=1)
@@ -102,13 +112,19 @@ class AD9912:
             raise ValueError("Urukul AD9912 product id mismatch")
         delay(50 * us)
         # HSTL power down, CMOS power down
-        self.write(AD9912_PWRCNTRL1, 0x80, length=1)
+        pwrcntrl1 = 0x80 | ((~self.pll_en & 1) << 4)
+        self.write(AD9912_PWRCNTRL1, pwrcntrl1, length=1)
         self.cpld.io_update.pulse(2 * us)
-        self.write(AD9912_N_DIV, self.pll_n // 2 - 2, length=1)
-        self.cpld.io_update.pulse(2 * us)
-        # I_cp = 375 µA, VCO high range
-        self.write(AD9912_PLLCFG, 0b00000101, length=1)
-        self.cpld.io_update.pulse(2 * us)
+        if self.pll_en:
+            self.write(AD9912_N_DIV, self.pll_n // 2 - 2, length=1)
+            self.cpld.io_update.pulse(2 * us)
+            # I_cp = 375 µA, VCO high range
+            if self.cpld.refclk < 11e6:
+                # enable SYSCLK PLL Doubler
+                self.write(AD9912_PLLCFG, 0b00001101, length=1)
+            else:
+                self.write(AD9912_PLLCFG, 0b00000101, length=1)
+            self.cpld.io_update.pulse(2 * us)
         delay(1 * ms)
 
     @kernel
@@ -117,9 +133,9 @@ class AD9912:
 
         This method will write the attenuator settings of all four channels.
 
-        .. seealso:: :meth:`artiq.coredevice.urukul.CPLD.set_att_mu`
+        See also :meth:`~artiq.coredevice.urukul.CPLD.set_att_mu`.
 
-        :param att: Attenuation setting, 8 bit digital.
+        :param att: Attenuation setting, 8-bit digital.
         """
         self.cpld.set_att_mu(self.chip_select - 4, att)
 
@@ -129,7 +145,7 @@ class AD9912:
 
         This method will write the attenuator settings of all four channels.
 
-        .. seealso:: :meth:`artiq.coredevice.urukul.CPLD.set_att`
+        See also :meth:`~artiq.coredevice.urukul.CPLD.set_att`.
 
         :param att: Attenuation in dB. Higher values mean more attenuation.
         """
@@ -139,9 +155,9 @@ class AD9912:
     def get_att_mu(self) -> TInt32:
         """Get digital step attenuator value in machine units.
 
-        .. seealso:: :meth:`artiq.coredevice.urukul.CPLD.get_channel_att_mu`
+        See also :meth:`~artiq.coredevice.urukul.CPLD.get_channel_att_mu`.
 
-        :return: Attenuation setting, 8 bit digital.
+        :return: Attenuation setting, 8-bit digital.
         """
         return self.cpld.get_channel_att_mu(self.chip_select - 4)
 
@@ -149,7 +165,7 @@ class AD9912:
     def get_att(self) -> TFloat:
         """Get digital step attenuator value in SI units.
 
-        .. seealso:: :meth:`artiq.coredevice.urukul.CPLD.get_channel_att`
+        See also :meth:`~artiq.coredevice.urukul.CPLD.get_channel_att`.
 
         :return: Attenuation in dB.
         """
@@ -162,8 +178,8 @@ class AD9912:
         After the SPI transfer, the shared IO update pin is pulsed to
         activate the data.
 
-        :param ftw: Frequency tuning word: 48 bit unsigned.
-        :param pow_: Phase tuning word: 16 bit unsigned.
+        :param ftw: Frequency tuning word: 48-bit unsigned.
+        :param pow_: Phase tuning word: 16-bit unsigned.
         """
         # streaming transfer of FTW and POW
         self.bus.set_config_mu(urukul.SPI_CONFIG, 16,
@@ -181,9 +197,9 @@ class AD9912:
     def get_mu(self) -> TTuple([TInt64, TInt32]):
         """Get the frequency tuning word and phase offset word.
 
-        .. seealso:: :meth:`get`
+        See also :meth:`AD9912.get`.
 
-        :return: A tuple ``(ftw, pow)``.
+        :return: A tuple (FTW, POW).
         """
 
         # Read data
@@ -231,7 +247,7 @@ class AD9912:
     def set(self, frequency: TFloat, phase: TFloat = 0.0):
         """Set profile 0 data in SI units.
 
-        .. seealso:: :meth:`set_mu`
+        See also :meth:`AD9912.set_mu`.
 
         :param frequency: Frequency in Hz
         :param phase: Phase tuning word in turns
@@ -243,9 +259,9 @@ class AD9912:
     def get(self) -> TTuple([TFloat, TFloat]):
         """Get the frequency and phase.
 
-        .. seealso:: :meth:`get_mu`
+        See also :meth:`AD9912.get_mu`.
 
-        :return: A tuple ``(frequency, phase)``.
+        :return: A tuple (frequency, phase).
         """
 
         # Get values

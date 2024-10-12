@@ -25,11 +25,15 @@ def default_iostandard(eem):
 
 class _EEM:
     @classmethod
-    def add_extension(cls, target, eem, *args, **kwargs):
+    def add_extension(cls, target, eem, *args, is_drtio_over_eem=False, **kwargs):
         name = cls.__name__
         target.platform.add_extension(cls.io(eem, *args, **kwargs))
-        print("{} (EEM{}) starting at RTIO channel 0x{:06x}"
-              .format(name, eem, len(target.rtio_channels)))
+        if is_drtio_over_eem:
+            print("{} (EEM{}) starting at DRTIO channel 0x{:06x}"
+                .format(name, eem, (len(target.gt_drtio.channels) + len(target.eem_drtio_channels) + 1) << 16))
+        else:
+            print("{} (EEM{}) starting at RTIO channel 0x{:06x}"
+                .format(name, eem, len(target.rtio_channels)))
 
 
 class DIO(_EEM):
@@ -259,25 +263,25 @@ class Sampler(_EEM):
         ios = [
             ("sampler{}_adc_spi_p".format(eem), 0,
                 Subsignal("clk", Pins(_eem_pin(eem, 0, "p"))),
-                Subsignal("miso", Pins(_eem_pin(eem, 1, "p"))),
+                Subsignal("miso", Pins(_eem_pin(eem, 1, "p")), Misc("DIFF_TERM=TRUE")),
                 iostandard(eem),
             ),
             ("sampler{}_adc_spi_n".format(eem), 0,
                 Subsignal("clk", Pins(_eem_pin(eem, 0, "n"))),
-                Subsignal("miso", Pins(_eem_pin(eem, 1, "n"))),
+                Subsignal("miso", Pins(_eem_pin(eem, 1, "n")), Misc("DIFF_TERM=TRUE")),
                 iostandard(eem),
             ),
             ("sampler{}_pgia_spi_p".format(eem), 0,
                 Subsignal("clk", Pins(_eem_pin(eem, 4, "p"))),
                 Subsignal("mosi", Pins(_eem_pin(eem, 5, "p"))),
-                Subsignal("miso", Pins(_eem_pin(eem, 6, "p"))),
+                Subsignal("miso", Pins(_eem_pin(eem, 6, "p")), Misc("DIFF_TERM=TRUE")),
                 Subsignal("cs_n", Pins(_eem_pin(eem, 7, "p"))),
                 iostandard(eem),
             ),
             ("sampler{}_pgia_spi_n".format(eem), 0,
                 Subsignal("clk", Pins(_eem_pin(eem, 4, "n"))),
                 Subsignal("mosi", Pins(_eem_pin(eem, 5, "n"))),
-                Subsignal("miso", Pins(_eem_pin(eem, 6, "n"))),
+                Subsignal("miso", Pins(_eem_pin(eem, 6, "n")), Misc("DIFF_TERM=TRUE")),
                 Subsignal("cs_n", Pins(_eem_pin(eem, 7, "n"))),
                 iostandard(eem),
             ),
@@ -633,14 +637,14 @@ class Mirny(_EEM):
             ("mirny{}_spi_p".format(eem), 0,
                 Subsignal("clk", Pins(_eem_pin(eem, 0, "p"))),
                 Subsignal("mosi", Pins(_eem_pin(eem, 1, "p"))),
-                Subsignal("miso", Pins(_eem_pin(eem, 2, "p"))),
+                Subsignal("miso", Pins(_eem_pin(eem, 2, "p")), Misc("DIFF_TERM=TRUE")),
                 Subsignal("cs_n", Pins(_eem_pin(eem, 3, "p"))),
                 iostandard(eem),
             ),
             ("mirny{}_spi_n".format(eem), 0,
                 Subsignal("clk", Pins(_eem_pin(eem, 0, "n"))),
                 Subsignal("mosi", Pins(_eem_pin(eem, 1, "n"))),
-                Subsignal("miso", Pins(_eem_pin(eem, 2, "n"))),
+                Subsignal("miso", Pins(_eem_pin(eem, 2, "n")), Misc("DIFF_TERM=TRUE")),
                 Subsignal("cs_n", Pins(_eem_pin(eem, 3, "n"))),
                 iostandard(eem),
             ),
@@ -709,20 +713,33 @@ class Phaser(_EEM):
             ) for pol in "pn"]
 
     @classmethod
-    def add_std(cls, target, eem, iostandard=default_iostandard):
+    def add_std(cls, target, eem, mode="base", iostandard=default_iostandard):
         cls.add_extension(target, eem, iostandard=iostandard)
 
-        phy = phaser.Phaser(
-            target.platform.request("phaser{}_ser_p".format(eem)),
-            target.platform.request("phaser{}_ser_n".format(eem)))
-        target.submodules += phy
-        target.rtio_channels.extend([
-            rtio.Channel.from_phy(phy, ififo_depth=4),
-            rtio.Channel.from_phy(phy.ch0.frequency),
-            rtio.Channel.from_phy(phy.ch0.phase_amplitude),
-            rtio.Channel.from_phy(phy.ch1.frequency),
-            rtio.Channel.from_phy(phy.ch1.phase_amplitude),
-        ])
+        if mode == "base":
+            phy = phaser.Base(
+                target.platform.request("phaser{}_ser_p".format(eem)),
+                target.platform.request("phaser{}_ser_n".format(eem)))
+            target.submodules += phy
+            target.rtio_channels.extend([
+                rtio.Channel.from_phy(phy, ififo_depth=4),
+                rtio.Channel.from_phy(phy.ch0.frequency),
+                rtio.Channel.from_phy(phy.ch0.phase_amplitude),
+                rtio.Channel.from_phy(phy.ch1.frequency),
+                rtio.Channel.from_phy(phy.ch1.phase_amplitude),
+            ])
+        elif mode == "miqro":
+            phy = phaser.Miqro(
+                target.platform.request("phaser{}_ser_p".format(eem)),
+                target.platform.request("phaser{}_ser_n".format(eem)))
+            target.submodules += phy
+            target.rtio_channels.extend([
+                rtio.Channel.from_phy(phy, ififo_depth=4),
+                rtio.Channel.from_phy(phy.ch0),
+                rtio.Channel.from_phy(phy.ch1),
+            ])
+        else:
+            raise ValueError("invalid mode", mode)
 
 
 class HVAmp(_EEM):
@@ -744,3 +761,36 @@ class HVAmp(_EEM):
             phy = ttl_out_cls(pads.p, pads.n)
             target.submodules += phy
             target.rtio_channels.append(rtio.Channel.from_phy(phy))
+
+
+class Shuttler(_EEM):
+    @staticmethod
+    def io(eem, iostandard=default_iostandard):
+        # Master: Pair 0~3 data IN, 4~7 OUT
+        data_in = ("shuttler{}_drtio_rx".format(eem), 0,
+            Subsignal("p", Pins("{} {} {} {}".format(*[
+                _eem_pin(eem, i, "p") for i in range(4)
+            ]))),
+            Subsignal("n", Pins("{} {} {} {}".format(*[
+                _eem_pin(eem, i, "n") for i in range(4)
+            ]))),
+            iostandard(eem),
+            Misc("DIFF_TERM=TRUE"),
+        )
+
+        data_out = ("shuttler{}_drtio_tx".format(eem), 0,
+            Subsignal("p", Pins("{} {} {} {}".format(*[
+                _eem_pin(eem, i, "p") for i in range(4, 8)
+            ]))),
+            Subsignal("n", Pins("{} {} {} {}".format(*[
+                _eem_pin(eem, i, "n") for i in range(4, 8)
+            ]))),
+            iostandard(eem),
+        )
+
+        return [data_in, data_out]
+
+    @classmethod
+    def add_std(cls, target, eem, eem_aux, iostandard=default_iostandard):
+        cls.add_extension(target, eem, is_drtio_over_eem=True, iostandard=iostandard)
+        target.eem_drtio_channels.append((target.platform.request("shuttler{}_drtio_rx".format(eem), 0), target.platform.request("shuttler{}_drtio_tx".format(eem), 0)))

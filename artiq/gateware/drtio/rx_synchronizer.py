@@ -2,6 +2,12 @@ from migen import *
 from migen.genlib.cdc import ElasticBuffer
 
 
+class NoRXSynchronizer:
+    """To be used when RX is already synchronous (e.g. IOSERDES based PHY)."""
+    def resync(self, signal):
+        return signal
+
+
 class GenericRXSynchronizer(Module):
     """Simple RX synchronizer based on the portable Migen elastic buffer.
 
@@ -17,7 +23,7 @@ class GenericRXSynchronizer(Module):
         return synchronized
 
     def do_finalize(self):
-        eb = ElasticBuffer(sum(len(s[0]) for s in self.signals), 4, "rtio_rx", "rtio")
+        eb = ElasticBuffer(sum(len(s[0]) for s in self.signals), 4, "rtio_rx", "sys")
         self.submodules += eb
         self.comb += [
             eb.din.eq(Cat(*[s[0] for s in self.signals])),
@@ -57,6 +63,6 @@ class XilinxRXSynchronizer(Module):
             self.specials += [
                 Instance("FD", i_C=ClockSignal("rtio_rx"), i_D=din[i], o_Q=inter[i],
                          attr={hu_set, ("RLOC", "X0Y{}".format(i))}),
-                Instance("FD", i_C=ClockSignal("rtio"), i_D=inter[i], o_Q=dout[i],
+                Instance("FD", i_C=ClockSignal("sys"), i_D=inter[i], o_Q=dout[i],
                          attr={hu_set, ("RLOC", "X1Y{}".format(i))})
             ]

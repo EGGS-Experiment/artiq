@@ -23,12 +23,12 @@ def y_mu_to_full_scale(y):
 
 
 @portable
-def adc_mu_to_volts(x, gain):
-    """Convert servo ADC data from machine units to Volt."""
+def adc_mu_to_volts(x, gain, corrected_fs=True):
+    """Convert servo ADC data from machine units to volts."""
     val = (x >> 1) & 0xffff
     mask = 1 << 15
     val = -(val & mask) + (val & ~mask)
-    return sampler.adc_mu_to_volt(val, gain)
+    return sampler.adc_mu_to_volt(val, gain, corrected_fs)
 
 
 class SUServo:
@@ -62,14 +62,15 @@ class SUServo:
     :param gains: Initial value for PGIA gains shift register
         (default: 0x0000). Knowledge of this state is not transferred
         between experiments.
+    :param sampler_hw_rev: Sampler's revision string
     :param core_device: Core device name
     """
     kernel_invariants = {"channel", "core", "pgia", "cplds", "ddses",
-                         "ref_period_mu"}
+                         "ref_period_mu", "corrected_fs"}
 
     def __init__(self, dmgr, channel, pgia_device,
                  cpld_devices, dds_devices,
-                 gains=0x0000, core_device="core"):
+                 gains=0x0000, sampler_hw_rev="v2.2", core_device="core"):
 
         self.core = dmgr.get(core_device)
         self.pgia = dmgr.get(pgia_device)
@@ -81,7 +82,12 @@ class SUServo:
         self.gains = gains
         self.ref_period_mu = self.core.seconds_to_mu(
             self.core.coarse_ref_period)
+        self.corrected_fs = sampler.Sampler.use_corrected_fs(sampler_hw_rev)
         assert self.ref_period_mu == self.core.ref_multiplier
+
+    @staticmethod
+    def get_rtio_channels(channel, **kwargs):
+        return [(channel, None)]
 
     @kernel
     def init(self):
@@ -149,7 +155,7 @@ class SUServo:
         This method advances the timeline by one servo memory access.
         It does not support RTIO event replacement.
 
-        :param enable (int): Enable servo operation. Enabling starts servo
+        :param int enable: Enable servo operation. Enabling starts servo
             iterations beginning with the ADC sampling stage. The first DDS
             update will happen about two servo cycles (~2.3 µs) after enabling
             the servo. The delay is deterministic.
@@ -192,7 +198,7 @@ class SUServo:
         consistent and valid data, stop the servo before using this method.
 
         :param adc: ADC channel number (0-7)
-        :return: 17 bit signed X0
+        :return: 17-bit signed X0
         """
         # State memory entries are 25 bits. Due to the pre-adder dynamic
         # range, X0/X1/OFFSET are only 24 bits. Finally, the RTIO interface
@@ -234,7 +240,7 @@ class SUServo:
         """
         val = self.get_adc_mu(channel)
         gain = (self.gains >> (channel*2)) & 0b11
-        return adc_mu_to_volts(val, gain)
+        return adc_mu_to_volts(val, gain, self.corrected_fs)
 
 
 class Channel:
@@ -254,6 +260,10 @@ class Channel:
         self.servo_channel = (self.channel + 4 * len(self.servo.cplds) -
                               self.servo.channel)
         self.dds = self.servo.ddses[self.servo_channel // 4]
+
+    @staticmethod
+    def get_rtio_channels(channel, **kwargs):
+        return [(channel, None)]
 
     @kernel
     def set(self, en_out, en_iir=0, profile=0):
@@ -278,12 +288,12 @@ class Channel:
     def set_dds_mu(self, profile, ftw, offs, pow_=0):
         """Set profile DDS coefficients in machine units.
 
-        .. seealso:: :meth:`set_amplitude`
+        See also :meth:`Channel.set_dds`.
 
         :param profile: Profile number (0-31)
-        :param ftw: Frequency tuning word (32 bit unsigned)
-        :param offs: IIR offset (17 bit signed)
-        :param pow_: Phase offset word (16 bit)
+        :param ftw: Frequency tuning word (32-bit unsigned)
+        :param offs: IIR offset (17-bit signed)
+        :param pow_: Phase offset word (16-bit)
         """
         base = (self.servo_channel << 8) | (profile << 3)
         self.servo.write(base + 0, ftw >> 16)
@@ -317,7 +327,7 @@ class Channel:
         See :meth:`set_dds_mu` for setting the complete DDS profile.
 
         :param profile: Profile number (0-31)
-        :param offs: IIR offset (17 bit signed)
+        :param offs: IIR offset (17-bit signed)
         """
         base = (self.servo_channel << 8) | (profile << 3)
         self.servo.write(base + 4, offs)
@@ -365,15 +375,15 @@ class Channel:
             * :math:`b_0` and :math:`b_1` are the feedforward gains for the two
               delays
 
-        .. seealso:: :meth:`set_iir`
+        See also :meth:`Channel.set_iir`.
 
         :param profile: Profile number (0-31)
         :param adc: ADC channel to take IIR input from (0-7)
-        :param a1: 18 bit signed A1 coefficient (Y1 coefficient,
+        :param a1: 18-bit signed A1 coefficient (Y1 coefficient,
             feedback, integrator gain)
-        :param b0: 18 bit signed B0 coefficient (recent,
+        :param b0: 18-bit signed B0 coefficient (recent,
             X0 coefficient, feed forward, proportional gain)
-        :param b1: 18 bit signed B1 coefficient (old,
+        :param b1: 18-bit signed B1 coefficient (old,
             X1 coefficient, feed forward, proportional gain)
         :param dly: IIR update suppression time. In units of IIR cycles
             (~1.2 µs, 0-255).
@@ -489,7 +499,7 @@ class Channel:
         consistent and valid data, stop the servo before using this method.
 
         :param profile: Profile number (0-31)
-        :return: 17 bit unsigned Y0
+        :return: 17-bit unsigned Y0
         """
         return self.servo.read(STATE_SEL | (self.servo_channel << 5) | profile)
 
@@ -525,7 +535,7 @@ class Channel:
         This method advances the timeline by one servo memory access.
 
         :param profile: Profile number (0-31)
-        :param y: 17 bit unsigned Y0
+        :param y: 17-bit unsigned Y0
         """
         # State memory is 25 bits wide and signed.
         # Reads interact with the 18 MSBs (coefficient memory width)

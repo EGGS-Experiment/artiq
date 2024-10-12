@@ -74,6 +74,9 @@ class RoundtripTest(ExperimentCase):
     def test_object_list(self):
         self.assertRoundtrip([object(), object()])
 
+    def test_object_tuple(self):
+        self.assertRoundtrip((False, object(), True, 0x12345678))
+
     def test_list_tuple(self):
         self.assertRoundtrip(([1, 2], [3, 4]))
 
@@ -95,7 +98,7 @@ class RoundtripTest(ExperimentCase):
         self.assertArrayRoundtrip(numpy.array([["a", "b"], ["c", "d"]]))
 
     # FIXME: This should work, but currently passes as the argument is just
-    # synthesised as a call to array() without forwarding the dype form the host
+    # synthesised as a call to array() without forwarding the dtype from the host
     # NumPy object.
     @unittest.expectedFailure
     def test_array_jagged(self):
@@ -570,3 +573,29 @@ class NumpyQuotingTest(ExperimentCase):
     def test_issue_1871(self):
         """Ensure numpy.array() does not break NumPy math functions"""
         self.create(_NumpyQuoting).run()
+
+
+class _IntBoundary(EnvExperiment):
+    def build(self):
+        self.setattr_device("core")
+        self.int32_min = numpy.iinfo(numpy.int32).min
+        self.int32_max = numpy.iinfo(numpy.int32).max
+        self.int64_min = numpy.iinfo(numpy.int64).min
+        self.int64_max = numpy.iinfo(numpy.int64).max
+
+    @kernel
+    def test_int32_bounds(self, min_val: TInt32, max_val: TInt32):
+        return min_val == self.int32_min and max_val == self.int32_max
+
+    @kernel
+    def test_int64_bounds(self, min_val: TInt64, max_val: TInt64):
+        return min_val == self.int64_min and max_val == self.int64_max
+
+    @kernel
+    def run(self):
+        self.test_int32_bounds(self.int32_min, self.int32_max)
+        self.test_int64_bounds(self.int64_min, self.int64_max)
+
+class IntBoundaryTest(ExperimentCase):
+    def test_int_boundary(self):
+        self.create(_IntBoundary).run()

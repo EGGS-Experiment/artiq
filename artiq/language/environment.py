@@ -1,5 +1,7 @@
 from collections import OrderedDict
 from inspect import isclass
+from contextlib import contextmanager
+from types import SimpleNamespace
 
 from sipyco import pyon
 
@@ -10,7 +12,8 @@ from artiq.language.core import rpc
 __all__ = ["NoDefault", "DefaultMissing",
            "PYONValue", "BooleanValue", "EnumerationValue",
            "NumberValue", "StringValue",
-           "HasEnvironment", "Experiment", "EnvExperiment"]
+           "HasEnvironment", "Experiment", "EnvExperiment",
+           "CancelledArgsError"]
 
 
 class NoDefault:
@@ -21,6 +24,12 @@ class NoDefault:
 class DefaultMissing(Exception):
     """Raised by the ``default`` method of argument processors when no default
     value is available."""
+    pass
+
+
+class CancelledArgsError(Exception):
+    """Raised by the :meth:`~artiq.language.environment.HasEnvironment.interactive` context manager when an interactive
+    arguments request is cancelled."""
     pass
 
 
@@ -80,9 +89,12 @@ class EnumerationValue(_SimpleArgProcessor):
 
     :param choices: A list of string representing the possible values of the
         argument.
+    :param quickstyle: Enables the choices to be displayed in the GUI as a 
+        list of buttons that submit the experiment when clicked.
     """
-    def __init__(self, choices, default=NoDefault):
+    def __init__(self, choices, default=NoDefault, quickstyle=False):
         self.choices = choices
+        self.quickstyle = quickstyle
         super().__init__(default)
 
     def process(self, x):
@@ -93,6 +105,7 @@ class EnumerationValue(_SimpleArgProcessor):
     def describe(self):
         d = _SimpleArgProcessor.describe(self)
         d["choices"] = self.choices
+        d["quickstyle"] = self.quickstyle
         return d
 
 
@@ -100,11 +113,11 @@ class NumberValue(_SimpleArgProcessor):
     """An argument that can take a numerical value.
 
     If ``type=="auto"``, the result will be a ``float`` unless
-    ndecimals = 0, scale = 1 and step is an integer. Setting ``type`` to
+    precision = 0, scale = 1 and step is an integer. Setting ``type`` to
     ``int`` will also result in an error unless these conditions are met.
 
     When ``scale`` is not specified, and the unit is a common one (i.e.
-    defined in ``artiq.language.units``), then the scale is obtained from
+    defined in :class:`~artiq.language.units`), then the scale is obtained from
     the unit using a simple string match. For example, milliseconds (``"ms"``)
     units set the scale to 0.001. No unit (default) corresponds to a scale of
     1.0.
@@ -123,14 +136,17 @@ class NumberValue(_SimpleArgProcessor):
         buttons in a UI. The default is the scale divided by 10.
     :param min: The minimum value of the argument.
     :param max: The maximum value of the argument.
-    :param ndecimals: The number of decimals a UI should use.
+    :param precision: The maximum number of decimals a UI should use.
     :param type: Type of this number. Accepts ``"float"``, ``"int"`` or
                  ``"auto"``. Defaults to ``"auto"``.
     """
     valid_types = ["auto", "float", "int"]
 
-    def __init__(self, default=NoDefault, unit="", scale=None,
-                 step=None, min=None, max=None, ndecimals=2, type="auto"):
+    def __init__(self, default=NoDefault, unit="", *, scale=None,
+                 step=None, min=None, max=None, precision=2, type="auto", ndecimals=None):
+        if ndecimals is not None:
+            print("DeprecationWarning: 'ndecimals' is deprecated. Please use 'precision' instead.")
+            precision = ndecimals
         if scale is None:
             if unit == "":
                 scale = 1.0
@@ -147,7 +163,7 @@ class NumberValue(_SimpleArgProcessor):
         self.step = step
         self.min = min
         self.max = max
-        self.ndecimals = ndecimals
+        self.precision = precision
         self.type = type
 
         if self.type not in NumberValue.valid_types:
@@ -155,7 +171,7 @@ class NumberValue(_SimpleArgProcessor):
 
         if self.type == "int" and not self._is_int_compatible():
             raise ValueError(("Value marked as integer but settings are "
-                              "not compatible. Please set ndecimals = 0, "
+                              "not compatible. Please set precision = 0, "
                               "scale = 1 and step to an integer"))
 
         super().__init__(default)
@@ -165,7 +181,7 @@ class NumberValue(_SimpleArgProcessor):
         Are the settings other than `type` compatible with this being
         an integer?
         '''
-        return (self.ndecimals == 0
+        return (self.precision == 0
                 and int(self.step) == self.step
                 and self.scale == 1)
 
@@ -191,7 +207,7 @@ class NumberValue(_SimpleArgProcessor):
         d["step"] = self.step
         d["min"] = self.min
         d["max"] = self.max
-        d["ndecimals"] = self.ndecimals
+        d["precision"] = self.precision
         d["type"] = self.type
         return d
 
@@ -209,17 +225,32 @@ class TraceArgumentManager:
         self.requested_args[key] = processor, group, tooltip
         return None
 
+    def get_interactive(self, interactive_arglist, title):
+        raise NotImplementedError
+
 
 class ProcessArgumentManager:
     def __init__(self, unprocessed_arguments):
         self.unprocessed_arguments = unprocessed_arguments
+        self._processed_arguments = set()
 
     def get(self, key, processor, group, tooltip):
         if key in self.unprocessed_arguments:
             r = processor.process(self.unprocessed_arguments[key])
+            self._processed_arguments.add(key)
         else:
             r = processor.default()
         return r
+
+    def check_unprocessed_arguments(self):
+        unprocessed = set(self.unprocessed_arguments.keys()) -\
+                      self._processed_arguments
+        if unprocessed:
+            raise AttributeError("Supplied argument(s) not queried in experiment: " +
+                                 ", ".join(unprocessed))
+
+    def get_interactive(self, interactive_arglist, title):
+        raise NotImplementedError
 
 
 class HasEnvironment:
@@ -290,7 +321,8 @@ class HasEnvironment:
 
         :param key: Name of the argument.
         :param processor: A description of how to process the argument, such
-            as instances of ``BooleanValue`` and ``NumberValue``.
+            as instances of :mod:`~artiq.language.environment.BooleanValue` and 
+            :mod:`~artiq.language.environment.NumberValue`.
         :param group: An optional string that defines what group the argument
             belongs to, for user interface purposes.
         :param tooltip: An optional string to describe the argument in more
@@ -311,6 +343,34 @@ class HasEnvironment:
         kernel_invariants = getattr(self, "kernel_invariants", set())
         self.kernel_invariants = kernel_invariants | {key}
 
+    @contextmanager
+    def interactive(self, title=""):
+        """Request arguments from the user interactively.
+
+        This context manager returns a namespace object on which the method
+        :meth:`~artiq.language.environment.HasEnvironment.setattr_argument` should be called, 
+        with the usual semantics.
+
+        When the context manager terminates, the experiment is blocked
+        and the user is presented with the requested argument widgets.
+        After the user enters values, the experiment is resumed and
+        the namespace contains the values of the arguments.
+
+        If the interactive arguments request is cancelled, raises
+        :exc:`~artiq.language.environment.CancelledArgsError`."""
+        interactive_arglist = []
+        namespace = SimpleNamespace()
+        def setattr_argument(key, processor=None, group=None, tooltip=None):
+            interactive_arglist.append((key, processor, group, tooltip))
+        namespace.setattr_argument = setattr_argument
+        yield namespace
+        del namespace.setattr_argument
+        argdict = self.__argument_mgr.get_interactive(interactive_arglist, title)
+        if argdict is None:
+            raise CancelledArgsError
+        for key, value in argdict.items():
+            setattr(namespace, key, value)
+
     def get_device_db(self):
         """Returns the full contents of the device database."""
         return self.__device_mgr.get_device_db()
@@ -329,13 +389,21 @@ class HasEnvironment:
         self.kernel_invariants = kernel_invariants | {key}
 
     @rpc(flags={"async"})
-    def set_dataset(self, key, value,
+    def set_dataset(self, key, value, *,
+                    unit=None, scale=None, precision=None,
                     broadcast=False, persist=False, archive=True):
         """Sets the contents and handling modes of a dataset.
 
         Datasets must be scalars (``bool``, ``int``, ``float`` or NumPy scalar)
         or NumPy arrays.
 
+        :param unit: A string representing the unit of the value.
+        :param scale: A numerical factor that is used to adjust the value of 
+            the dataset to match the scale or units of the experiment's
+            reference frame when the value is displayed.
+        :param precision: The maximum number of digits to print after the
+            decimal point. Set ``precision=None`` to print as many digits as 
+            necessary to uniquely specify the value. Uses IEEE unbiased rounding.
         :param broadcast: the data is sent in real-time to the master, which
             dispatches it.
         :param persist: the master should store the data on-disk. Implies
@@ -343,7 +411,14 @@ class HasEnvironment:
         :param archive: the data is saved into the local storage of the current
             run (archived as a HDF5 file).
         """
-        self.__dataset_mgr.set(key, value, broadcast, persist, archive)
+        metadata = {}
+        if unit is not None:
+            metadata["unit"] = unit
+        if scale is not None:
+            metadata["scale"] = scale
+        if precision is not None:
+            metadata["precision"] = precision
+        self.__dataset_mgr.set(key, value, metadata, broadcast, persist, archive)
 
     @rpc(flags={"async"})
     def mutate_dataset(self, key, index, value):
@@ -391,6 +466,24 @@ class HasEnvironment:
         """
         try:
             return self.__dataset_mgr.get(key, archive)
+        except KeyError:
+            if default is NoDefault:
+                raise
+            else:
+                return default
+
+    def get_dataset_metadata(self, key, default=NoDefault):
+        """Returns the metadata of a dataset.
+         
+        Returns dictionary with items describing the dataset, including the units, 
+        scale and precision. 
+
+        This function is used to get additional information for displaying the dataset.
+
+        See :meth:`set_dataset` for documentation of metadata items.
+        """
+        try:
+            return self.__dataset_mgr.get_metadata(key)
         except KeyError:
             if default is NoDefault:
                 raise

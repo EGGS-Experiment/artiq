@@ -55,12 +55,14 @@ struct ExceptionBuffer {
     exception_count: usize,
 }
 
+const EXCEPTION: uw::_Unwind_Exception = uw::_Unwind_Exception {
+    exception_class:   EXCEPTION_CLASS,
+    exception_cleanup: cleanup,
+    private:           [0; uw::unwinder_private_data_size],
+};
+
 static mut EXCEPTION_BUFFER: ExceptionBuffer = ExceptionBuffer {
-    uw_exceptions: [uw::_Unwind_Exception {
-        exception_class:   EXCEPTION_CLASS,
-        exception_cleanup: cleanup,
-        private:           [0; uw::unwinder_private_data_size],
-    }; MAX_INFLIGHT_EXCEPTIONS],
+    uw_exceptions: [EXCEPTION; MAX_INFLIGHT_EXCEPTIONS],
     exceptions: [None; MAX_INFLIGHT_EXCEPTIONS + 1],
     exception_stack: [-1; MAX_INFLIGHT_EXCEPTIONS + 1],
     backtrace: [(0, 0); MAX_BACKTRACE_SIZE],
@@ -74,11 +76,7 @@ static mut EXCEPTION_BUFFER: ExceptionBuffer = ExceptionBuffer {
 };
 
 pub unsafe extern fn reset_exception_buffer(payload_addr: usize) {
-    EXCEPTION_BUFFER.uw_exceptions = [uw::_Unwind_Exception {
-        exception_class:   EXCEPTION_CLASS,
-        exception_cleanup: cleanup,
-        private:           [0; uw::unwinder_private_data_size],
-    }; MAX_INFLIGHT_EXCEPTIONS];
+    EXCEPTION_BUFFER.uw_exceptions = [EXCEPTION; MAX_INFLIGHT_EXCEPTIONS];
     EXCEPTION_BUFFER.exceptions = [None; MAX_INFLIGHT_EXCEPTIONS + 1];
     EXCEPTION_BUFFER.exception_stack = [-1; MAX_INFLIGHT_EXCEPTIONS + 1];
     EXCEPTION_BUFFER.backtrace_size = 0;
@@ -151,8 +149,7 @@ pub extern fn personality(version: c_int,
 }
 
 #[export_name="__artiq_raise"]
-#[unwind(allowed)]
-pub unsafe extern fn raise(exception: *const Exception) -> ! {
+pub unsafe extern "C-unwind" fn raise(exception: *const Exception) -> ! {
     let count = EXCEPTION_BUFFER.exception_count;
     let stack = &mut EXCEPTION_BUFFER.exception_stack;
     let diff = exception as isize - EXCEPTION_BUFFER.exceptions.as_ptr() as isize;
@@ -222,8 +219,7 @@ pub unsafe extern fn raise(exception: *const Exception) -> ! {
 
 
 #[export_name="__artiq_resume"]
-#[unwind(allowed)]
-pub unsafe extern fn resume() -> ! {
+pub unsafe extern "C-unwind" fn resume() -> ! {
     assert!(EXCEPTION_BUFFER.exception_count != 0);
     let i = EXCEPTION_BUFFER.exception_stack[EXCEPTION_BUFFER.exception_count - 1];
     assert!(i != -1);
@@ -233,8 +229,7 @@ pub unsafe extern fn resume() -> ! {
 }
 
 #[export_name="__artiq_end_catch"]
-#[unwind(allowed)]
-pub unsafe extern fn end_catch() {
+pub unsafe extern "C-unwind" fn end_catch() {
     let mut count = EXCEPTION_BUFFER.exception_count;
     assert!(count != 0);
     // we remove all exceptions with SP <= current exception SP
@@ -333,7 +328,8 @@ extern fn stop_fn(_version: c_int,
     }
 }
 
-static EXCEPTION_ID_LOOKUP: [(&str, u32); 11] = [
+// Must be kept in sync with `artiq.compiler.embedding`
+static EXCEPTION_ID_LOOKUP: [(&str, u32); 12] = [
     ("RuntimeError", 0),
     ("RTIOUnderflow", 1),
     ("RTIOOverflow", 2),
@@ -345,6 +341,7 @@ static EXCEPTION_ID_LOOKUP: [(&str, u32); 11] = [
     ("ZeroDivisionError", 8),
     ("IndexError", 9),
     ("UnwrapNoneError", 10),
+    ("SubkernelError", 11),
 ];
 
 pub fn get_exception_id(name: &str) -> u32 {
@@ -354,5 +351,31 @@ pub fn get_exception_id(name: &str) -> u32 {
         }
     }
     unimplemented!("unallocated internal exception id")
+}
+
+/// Takes as input exception id from host
+/// Generates a new exception with:
+///   * `id` set to `exn_id`
+///   * `message` set to corresponding exception name from `EXCEPTION_ID_LOOKUP`
+///
+/// The message is matched on host to ensure correct exception is being referred 
+/// This test checks the synchronization of exception ids for runtime errors
+#[no_mangle]
+pub extern "C-unwind" fn test_exception_id_sync(exn_id: u32) {
+    let message = EXCEPTION_ID_LOOKUP
+        .iter()
+        .find_map(|&(name, id)| if id == exn_id { Some(name) } else { None })
+        .unwrap_or("unallocated internal exception id");
+    
+    let exn = Exception {
+        id:       exn_id,
+        file:     file!().as_c_slice(),
+        line:     0,
+        column:   0,
+        function: "test_exception_id_sync".as_c_slice(),
+        message:  message.as_c_slice(),
+        param:    [0, 0, 0]
+    };
+    unsafe { raise(&exn) };
 }
 

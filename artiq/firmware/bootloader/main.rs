@@ -18,6 +18,10 @@ use board_misoc::slave_fpga;
 use board_misoc::{clock, ethmac, net_settings};
 use board_misoc::uart_console::Console;
 use riscv::register::{mcause, mepc, mtval};
+#[cfg(has_ethmac)]
+use smoltcp::iface::{Routes, SocketStorage};
+#[cfg(has_ethmac)]
+use smoltcp::wire::{HardwareAddress, IpAddress, Ipv4Address, Ipv6Address};
 
 fn check_integrity() -> bool {
     extern {
@@ -396,6 +400,9 @@ fn network_boot() {
 
     println!("Initializing network...");
 
+    // Assuming only one socket is ever needed by the bootloader.
+    // The smoltcp reuses the listening socket when the connection is established.
+    let mut sockets = [SocketStorage::EMPTY];
     let mut net_device = unsafe { ethmac::EthernetDevice::new() };
     net_device.reset_phy_if_any();
 
@@ -405,38 +412,38 @@ fn network_boot() {
     let net_addresses = net_settings::get_adresses();
     println!("Network addresses: {}", net_addresses);
     let mut ip_addrs = [
-        IpCidr::new(net_addresses.ipv4_addr, 0),
-        IpCidr::new(net_addresses.ipv6_ll_addr, 0),
-        IpCidr::new(net_addresses.ipv6_ll_addr, 0)
+        IpCidr::new(IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), 0),
+        net_addresses.ipv6_ll_addr,
+        IpCidr::new(IpAddress::Ipv6(Ipv6Address::UNSPECIFIED), 0)
     ];
-    let mut interface = match net_addresses.ipv6_addr {
-        Some(addr) => {
-            ip_addrs[2] = IpCidr::new(addr, 0);
-            smoltcp::iface::EthernetInterfaceBuilder::new(net_device)
-                       .ethernet_addr(net_addresses.hardware_addr)
-                       .ip_addrs(&mut ip_addrs[..])
-                       .neighbor_cache(neighbor_cache)
-                       .finalize()
-        }
-        None =>
-            smoltcp::iface::EthernetInterfaceBuilder::new(net_device)
-                       .ethernet_addr(net_addresses.hardware_addr)
-                       .ip_addrs(&mut ip_addrs[..2])
-                       .neighbor_cache(neighbor_cache)
-                       .finalize()
+    if let net_settings::Ipv4AddrConfig::Static(ipv4) = net_addresses.ipv4_addr {
+        ip_addrs[0] = IpCidr::Ipv4(ipv4);
+    }
+    if let Some(ipv6) =  net_addresses.ipv6_addr {
+        ip_addrs[2] = IpCidr::Ipv6(ipv6);
     };
+    let mut routes = [None; 2];
+    let mut interface = smoltcp::iface::InterfaceBuilder::new(net_device, &mut sockets[..])
+        .hardware_addr(HardwareAddress::Ethernet(net_addresses.hardware_addr))
+        .ip_addrs(&mut ip_addrs[..])
+        .neighbor_cache(neighbor_cache)
+        .routes(Routes::new(&mut routes[..]))
+        .finalize();
+
+    if let Some(default_route) = net_addresses.ipv4_default_route {
+        interface.routes_mut().add_default_ipv4_route(default_route).unwrap();
+    }
+    if let Some(default_route) = net_addresses.ipv6_default_route {
+        interface.routes_mut().add_default_ipv6_route(default_route).unwrap();
+    }
 
     let mut rx_storage = [0; 4096];
     let mut tx_storage = [0; 128];
 
-    let mut socket_set_entries: [_; 1] = Default::default();
-    let mut sockets =
-        smoltcp::socket::SocketSet::new(&mut socket_set_entries[..]);
-
     let tcp_rx_buffer = smoltcp::socket::TcpSocketBuffer::new(&mut rx_storage[..]);
     let tcp_tx_buffer = smoltcp::socket::TcpSocketBuffer::new(&mut tx_storage[..]);
     let tcp_socket = smoltcp::socket::TcpSocket::new(tcp_rx_buffer, tcp_tx_buffer);
-    let tcp_handle = sockets.add(tcp_socket);
+    let tcp_handle = interface.add_socket(tcp_socket);
 
     let mut net_conn = NetConn::new();
     let mut boot_time = None;
@@ -446,7 +453,7 @@ fn network_boot() {
     loop {
         let timestamp = clock::get_ms() as i64;
         {
-            let socket = &mut *sockets.get::<smoltcp::socket::TcpSocket>(tcp_handle);
+            let socket = &mut *interface.get_socket::<smoltcp::socket::TcpSocket>(tcp_handle);
 
             match boot_time {
                 None => {
@@ -475,7 +482,7 @@ fn network_boot() {
             }
         }
 
-        match interface.poll(&mut sockets, smoltcp::time::Instant::from_millis(timestamp)) {
+        match interface.poll(smoltcp::time::Instant::from_millis(timestamp)) {
             Ok(_) => (),
             Err(smoltcp::Error::Unrecognized) => (),
             Err(err) => println!("Network error: {}", err)
@@ -493,7 +500,7 @@ pub extern fn main() -> i32 {
     println!(r"|_|  |_|_|____/ \___/ \____|");
     println!("");
     println!("MiSoC Bootloader");
-    println!("Copyright (c) 2017-2022 M-Labs Limited");
+    println!("Copyright (c) 2017-2024 M-Labs Limited");
     println!("");
 
     #[cfg(has_ethmac)]

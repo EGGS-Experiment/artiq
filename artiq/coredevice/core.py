@@ -1,5 +1,6 @@
 import os, sys
 import numpy
+from inspect import getfullargspec
 from functools import wraps
 
 from pythonparser import diagnostic
@@ -52,6 +53,20 @@ def rtio_get_destination_status(linkno: TInt32) -> TBool:
 def rtio_get_counter() -> TInt64:
     raise NotImplementedError("syscall not simulated")
 
+@syscall
+def test_exception_id_sync(id: TInt32) -> TNone:
+    raise NotImplementedError("syscall not simulated")
+
+def get_target_cls(target):
+    if target == "rv32g":
+        return RV32GTarget
+    elif target == "rv32ima":
+        return RV32IMATarget
+    elif target == "cortexa9":
+        return CortexA9Target
+    else:
+        raise ValueError("Unsupported target")
+
 
 class Core:
     """Core device driver.
@@ -61,63 +76,79 @@ class Core:
         On platforms that use clock multiplication and SERDES-based PHYs,
         this is the period after multiplication. For example, with a RTIO core
         clocked at 125MHz and a SERDES multiplication factor of 8, the
-        reference period is 1ns.
-        The time machine unit is equal to this period.
+        reference period is ``1 ns``.
+        The machine time unit (``mu``) is equal to this period.
     :param ref_multiplier: ratio between the RTIO fine timestamp frequency
         and the RTIO coarse timestamp frequency (e.g. SERDES multiplication
         factor).
+    :param analyzer_proxy: name of the core device analyzer proxy to trigger
+        (optional).
+    :param analyze_at_run_end: automatically trigger the core device analyzer
+        proxy after the Experiment's run stage finishes.
     """
 
     kernel_invariants = {
         "core", "ref_period", "coarse_ref_period", "ref_multiplier",
     }
 
-    def __init__(self, dmgr, host, ref_period, ref_multiplier=8, target="rv32g"):
+    def __init__(self, dmgr,
+                 host, ref_period,
+                 analyzer_proxy=None, analyze_at_run_end=False,
+                 ref_multiplier=8,
+                 target="rv32g", satellite_cpu_targets={}):
         self.ref_period = ref_period
         self.ref_multiplier = ref_multiplier
-        if target == "rv32g":
-            self.target_cls = RV32GTarget
-        elif target == "rv32ima":
-            self.target_cls = RV32IMATarget
-        elif target == "cortexa9":
-            self.target_cls = CortexA9Target
-        else:
-            raise ValueError("Unsupported target")
+        self.satellite_cpu_targets = satellite_cpu_targets
+        self.target_cls = get_target_cls(target)
         self.coarse_ref_period = ref_period*ref_multiplier
         if host is None:
             self.comm = CommKernelDummy()
         else:
             self.comm = CommKernel(host)
+        self.analyzer_proxy_name = analyzer_proxy
+        self.analyze_at_run_end = analyze_at_run_end
 
         self.first_run = True
         self.dmgr = dmgr
         self.core = self
         self.comm.core = self
+        self.analyzer_proxy = None
+
+    def notify_run_end(self):
+        if self.analyze_at_run_end:
+            self.trigger_analyzer_proxy()
 
     def close(self):
+        """Disconnect core device and close sockets. 
+        """
         self.comm.close()
 
     def compile(self, function, args, kwargs, set_result=None,
-                attribute_writeback=True, print_as_rpc=True):
+                attribute_writeback=True, print_as_rpc=True,
+                target=None, destination=0, subkernel_arg_types=[],
+                old_embedding_map=None):
         try:
             engine = _DiagnosticEngine(all_errors_are_fatal=True)
 
             stitcher = Stitcher(engine=engine, core=self, dmgr=self.dmgr,
-                                print_as_rpc=print_as_rpc)
+                                print_as_rpc=print_as_rpc,
+                                destination=destination, subkernel_arg_types=subkernel_arg_types,
+                                old_embedding_map=old_embedding_map)
             stitcher.stitch_call(function, args, kwargs, set_result)
             stitcher.finalize()
 
             module = Module(stitcher,
                 ref_period=self.ref_period,
                 attribute_writeback=attribute_writeback)
-            target = self.target_cls()
+            target = target if target is not None else self.target_cls()
 
             library = target.compile_and_link([module])
             stripped_library = target.strip(library)
 
             return stitcher.embedding_map, stripped_library, \
                    lambda addresses: target.symbolize(library, addresses), \
-                   lambda symbols: target.demangle(symbols)
+                   lambda symbols: target.demangle(symbols), \
+                   module.subkernel_arg_types
         except diagnostic.Error as error:
             raise CompileError(error.diagnostic) from error
 
@@ -135,10 +166,69 @@ class Core:
         def set_result(new_result):
             nonlocal result
             result = new_result
-        embedding_map, kernel_library, symbolizer, demangler = \
+        embedding_map, kernel_library, symbolizer, demangler, subkernel_arg_types = \
             self.compile(function, args, kwargs, set_result)
+        self.compile_and_upload_subkernels(embedding_map, args, subkernel_arg_types)
         self._run_compiled(kernel_library, embedding_map, symbolizer, demangler)
         return result
+
+    def compile_subkernel(self, sid, subkernel_fn, embedding_map, args, subkernel_arg_types, subkernels):
+        # pass self to subkernels (if applicable)
+        # assuming the first argument is self
+        subkernel_args = getfullargspec(subkernel_fn.artiq_embedded.function)
+        self_arg = []
+        if len(subkernel_args[0]) > 0:
+            if subkernel_args[0][0] == 'self':
+                self_arg = args[:1]
+        destination = subkernel_fn.artiq_embedded.destination
+        destination_tgt = self.satellite_cpu_targets[destination]
+        target = get_target_cls(destination_tgt)(subkernel_id=sid)
+        object_map, kernel_library, _, _, _ = \
+            self.compile(subkernel_fn, self_arg, {}, attribute_writeback=False,
+                        print_as_rpc=False, target=target, destination=destination, 
+                        subkernel_arg_types=subkernel_arg_types.get(sid, []),
+                        old_embedding_map=embedding_map)
+        if object_map.has_rpc():
+            raise ValueError("Subkernel must not use RPC")
+        return destination, kernel_library, object_map
+
+    def compile_and_upload_subkernels(self, embedding_map, args, subkernel_arg_types):
+        subkernels = embedding_map.subkernels()
+        subkernels_compiled = []
+        while True:
+            new_subkernels = {}
+            for sid, subkernel_fn in subkernels.items():
+                if sid in subkernels_compiled:
+                    continue
+                destination, kernel_library, embedding_map = \
+                    self.compile_subkernel(sid, subkernel_fn, embedding_map,
+                                        args, subkernel_arg_types, subkernels)
+                self.comm.upload_subkernel(kernel_library, sid, destination)
+                new_subkernels.update(embedding_map.subkernels())
+                subkernels_compiled.append(sid)
+            if new_subkernels == subkernels:
+                break
+            subkernels.update(new_subkernels)
+        # check for messages without a send/recv pair
+        unpaired_messages = embedding_map.subkernel_messages_unpaired()
+        if unpaired_messages:
+            for unpaired_message in unpaired_messages:
+                engine = _DiagnosticEngine(all_errors_are_fatal=False)
+                # errors are non-fatal in order to display
+                # all unpaired message errors before raising an excption
+                if unpaired_message.send_loc is None:
+                    diag = diagnostic.Diagnostic("error",
+                        "subkernel message '{name}' only has a receiver but no sender",
+                        {"name": unpaired_message.name},
+                        unpaired_message.recv_loc)
+                else:
+                    diag = diagnostic.Diagnostic("error",
+                        "subkernel message '{name}' only has a sender but no receiver",
+                        {"name": unpaired_message.name},
+                        unpaired_message.send_loc)
+                engine.process(diag)
+            raise ValueError("Found subkernel message(s) without a full send/recv pair")
+
 
     def precompile(self, function, *args, **kwargs):
         """Precompile a kernel and return a callable that executes it on the core device
@@ -148,7 +238,7 @@ class Core:
         as additional positional and keyword arguments.
         The returned callable accepts no arguments.
 
-        Precompiled kernels may use RPCs.
+        Precompiled kernels may use RPCs and subkernels.
 
         Object attributes at the beginning of a precompiled kernel execution have the
         values they had at precompilation time. If up-to-date values are required,
@@ -156,8 +246,8 @@ class Core:
         Similarly, modified values are not written back, and explicit RPC should be used
         to modify host objects.
         Carefully review the source code of drivers calls used in precompiled kernels, as
-        they may rely on host object attributes being transfered between kernel calls.
-        Examples include code used to control DDS phase, and Urukul RF switch control
+        they may rely on host object attributes being transferred between kernel calls.
+        Examples include code used to control DDS phase and Urukul RF switch control
         via the CPLD register.
 
         The return value of the callable is the return value of the kernel, if any.
@@ -173,8 +263,9 @@ class Core:
             nonlocal result
             result = new_result
 
-        embedding_map, kernel_library, symbolizer, demangler = \
+        embedding_map, kernel_library, symbolizer, demangler, subkernel_arg_types = \
             self.compile(function, args, kwargs, set_result, attribute_writeback=False)
+        self.compile_and_upload_subkernels(embedding_map, args, subkernel_arg_types)
 
         @wraps(function)
         def run_precompiled():
@@ -187,7 +278,7 @@ class Core:
     @portable
     def seconds_to_mu(self, seconds):
         """Convert seconds to the corresponding number of machine units
-        (RTIO cycles).
+        (fine RTIO cycles).
 
         :param seconds: time (in seconds) to convert.
         """
@@ -195,7 +286,7 @@ class Core:
 
     @portable
     def mu_to_seconds(self, mu):
-        """Convert machine units (RTIO cycles) to seconds.
+        """Convert machine units (fine RTIO cycles) to seconds.
 
         :param mu: cycle count to convert.
         """
@@ -210,7 +301,7 @@ class Core:
         for the actual value of the hardware register at the instant when
         execution resumes in the caller.
 
-        For a more detailed description of these concepts, see :doc:`/rtio`.
+        For a more detailed description of these concepts, see :doc:`rtio`.
         """
         return rtio_get_counter()
 
@@ -229,7 +320,7 @@ class Core:
     def get_rtio_destination_status(self, destination):
         """Returns whether the specified RTIO destination is up.
         This is particularly useful in startup kernels to delay
-        startup until certain DRTIO destinations are up."""
+        startup until certain DRTIO destinations are available."""
         return rtio_get_destination_status(destination)
 
     @kernel
@@ -250,3 +341,21 @@ class Core:
         min_now = rtio_get_counter() + 125000
         if now_mu() < min_now:
             at_mu(min_now)
+
+    def trigger_analyzer_proxy(self):
+        """Causes the core analyzer proxy to retrieve a dump from the device,
+        and distribute it to all connected clients (typically dashboards).
+
+        Returns only after the dump has been retrieved from the device.
+
+        Raises :exc:`IOError` if no analyzer proxy has been configured, or if the
+        analyzer proxy fails. In the latter case, more details would be
+        available in the proxy log.
+        """
+        if self.analyzer_proxy is None:
+            if self.analyzer_proxy_name is not None:
+                self.analyzer_proxy = self.dmgr.get(self.analyzer_proxy_name)
+        if self.analyzer_proxy is None:
+            raise IOError("No analyzer proxy configured")
+        else:
+            self.analyzer_proxy.trigger()

@@ -7,7 +7,7 @@ from functools import wraps
 import numpy
 
 
-__all__ = ["kernel", "portable", "rpc", "syscall", "host_only",
+__all__ = ["kernel", "portable", "rpc", "subkernel", "syscall", "host_only",
            "kernel_from_string", "set_time_manager", "set_watchdog_factory",
            "TerminationRequested"]
 
@@ -21,14 +21,14 @@ __all__.extend(kernel_globals)
 
 
 _ARTIQEmbeddedInfo = namedtuple("_ARTIQEmbeddedInfo",
-                                "core_name portable function syscall forbidden flags")
+                                "core_name portable function syscall forbidden destination flags")
 
 def kernel(arg=None, flags={}):
     """
     This decorator marks an object's method for execution on the core
     device.
 
-    When a decorated method is called from the Python interpreter, the :attr:`core`
+    When a decorated method is called from the Python interpreter, the ``core``
     attribute of the object is retrieved and used as core device driver. The
     core device driver will typically compile, transfer and run the method
     (kernel) on the device.
@@ -41,7 +41,7 @@ def kernel(arg=None, flags={}):
         - if the method is a regular Python method (not a kernel), it generates
           a remote procedure call (RPC) for execution on the host.
 
-    The decorator takes an optional parameter that defaults to :attr`core` and
+    The decorator takes an optional parameter that defaults to ``core`` and
     specifies the name of the attribute to use as core device driver.
 
     This decorator must be present in the global namespace of all modules using
@@ -54,7 +54,7 @@ def kernel(arg=None, flags={}):
                 return getattr(self, arg).run(run_on_core, ((self,) + k_args), k_kwargs)
             run_on_core.artiq_embedded = _ARTIQEmbeddedInfo(
                 core_name=arg, portable=False, function=function, syscall=None,
-                forbidden=False, flags=set(flags))
+                forbidden=False, destination=None, flags=set(flags))
             return run_on_core
         return inner_decorator
     elif arg is None:
@@ -63,6 +63,50 @@ def kernel(arg=None, flags={}):
         return inner_decorator
     else:
         return kernel("core", flags)(arg)
+
+def subkernel(arg=None, destination=0, flags={}):
+    """
+    This decorator marks an object's method or function for execution on a satellite device.
+    Destination must be given, and it must be between 1 and 255 (inclusive).
+
+    Subkernels behave similarly to kernels, with few key differences:
+
+        - they are started from main kernels,
+        - they do not support RPCs,
+        - but they can call other kernels or subkernels.
+
+    Subkernels can accept arguments and return values. However, they must be fully 
+    annotated with ARTIQ types.
+
+    To call a subkernel, call it like a normal function. 
+    
+    To await its finishing execution, call ``subkernel_await(subkernel, [timeout])``.
+    The timeout parameter is optional, and by default is equal to 10000 (miliseconds).
+    This time can be adjusted for subkernels that take a long time to execute.
+
+    The compiled subkernel is copied to satellites, but not yet to the kernel core
+    until it's called. For bigger subkernels it may take some time before they
+    actually start running. To help with that, subkernels can be preloaded, with
+    ``subkernel_preload(subkernel)`` function. A call to a preloaded subkernel 
+    will take less time, but only one subkernel can be preloaded at a time.
+    """
+    if isinstance(arg, str):
+        def inner_decorator(function):
+            @wraps(function)
+            def run_subkernel(self, *k_args, **k_kwargs):
+                sid = getattr(self, arg).prepare_subkernel(destination, run_subkernel, ((self,) + k_args), k_kwargs)
+                getattr(self, arg).run_subkernel(sid)
+            run_subkernel.artiq_embedded = _ARTIQEmbeddedInfo(
+                core_name=arg, portable=False, function=function, syscall=None,
+                forbidden=False, destination=destination, flags=set(flags))
+            return run_subkernel
+        return inner_decorator
+    elif arg is None:
+        def inner_decorator(function):
+            return subkernel(function, destination, flags)
+        return inner_decorator
+    else:
+        return subkernel("core", destination, flags)(arg)
 
 def portable(arg=None, flags={}):
     """
@@ -84,13 +128,13 @@ def portable(arg=None, flags={}):
     else:
         arg.artiq_embedded = \
             _ARTIQEmbeddedInfo(core_name=None, portable=True, function=arg, syscall=None,
-                               forbidden=False, flags=set(flags))
+                               forbidden=False, destination=None, flags=set(flags))
         return arg
 
 def rpc(arg=None, flags={}):
     """
     This decorator marks a function for execution on the host interpreter.
-    This is also the default behavior of ARTIQ; however, this decorator allows
+    This is also the default behavior of ARTIQ; however, this decorator allows for
     specifying additional flags.
     """
     if arg is None:
@@ -100,7 +144,7 @@ def rpc(arg=None, flags={}):
     else:
         arg.artiq_embedded = \
             _ARTIQEmbeddedInfo(core_name=None, portable=False, function=arg, syscall=None,
-                               forbidden=False, flags=set(flags))
+                               forbidden=False, destination=None, flags=set(flags))
         return arg
 
 def syscall(arg=None, flags={}):
@@ -118,7 +162,7 @@ def syscall(arg=None, flags={}):
         def inner_decorator(function):
             function.artiq_embedded = \
                 _ARTIQEmbeddedInfo(core_name=None, portable=False, function=None,
-                                   syscall=arg, forbidden=False,
+                                   syscall=arg, forbidden=False, destination=None,
                                    flags=set(flags))
             return function
         return inner_decorator
@@ -136,7 +180,7 @@ def host_only(function):
     """
     function.artiq_embedded = \
         _ARTIQEmbeddedInfo(core_name=None, portable=False, function=None, syscall=None,
-                           forbidden=True, flags={})
+                           forbidden=True, destination=None, flags={})
     return function
 
 
@@ -212,7 +256,7 @@ _time_manager = _DummyTimeManager()
 def set_time_manager(time_manager):
     """Set the time manager used for simulating kernels by running them
     directly inside the Python interpreter. The time manager responds to the
-    entering and leaving of interleave/parallel/sequential blocks, delays, etc. and
+    entering and leaving of parallel/sequential blocks, delays, etc. and
     provides a time-stamped logging facility for events.
     """
     global _time_manager
@@ -236,7 +280,7 @@ class _Parallel:
 
     The execution time of a parallel block is the execution time of its longest
     statement. A parallel block may contain sequential blocks, which themselves
-    may contain interleave blocks, etc.
+    may contain parallel blocks, etc.
     """
     def __enter__(self):
         _time_manager.enter_parallel()
@@ -296,5 +340,5 @@ def watchdog(timeout):
 
 
 class TerminationRequested(Exception):
-    """Raised by ``pause`` when the user has requested termination."""
+    """Raised by :meth:`pause` when the user has requested termination."""
     pass

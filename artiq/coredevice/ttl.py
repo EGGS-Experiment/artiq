@@ -27,7 +27,7 @@ class TTLOut:
 
     This should be used with output-only channels.
 
-    :param channel: channel number
+    :param channel: Channel number
     """
     kernel_invariants = {"core", "channel", "target_o"}
 
@@ -35,6 +35,10 @@ class TTLOut:
         self.core = dmgr.get(core_device)
         self.channel = channel
         self.target_o = channel << 8
+
+    @staticmethod
+    def get_rtio_channels(channel, **kwargs):
+        return [(channel, None)]
 
     @kernel
     def output(self):
@@ -105,7 +109,7 @@ class TTLInOut:
     API is active (e.g. the gate is open, or the input events have not been
     fully read out), another API must not be used simultaneously.
 
-    :param channel: channel number
+    :param channel: Channel number
     """
     kernel_invariants = {"core", "channel", "gate_latency_mu",
         "target_o", "target_oe", "target_sens", "target_sample"}
@@ -128,6 +132,10 @@ class TTLInOut:
         self.target_sens   = (channel << 8) + 2
         self.target_sample = (channel << 8) + 3
 
+    @staticmethod
+    def get_rtio_channels(channel, **kwargs):
+        return [(channel, None)]
+
     @kernel
     def set_oe(self, oe):
         rtio_output(self.target_oe, 1 if oe else 0)
@@ -137,7 +145,7 @@ class TTLInOut:
         """Set the direction to output at the current position of the time
         cursor.
 
-        There must be a delay of at least one RTIO clock cycle before any
+        A delay of at least one RTIO clock cycle is necessary before any
         other command can be issued.
 
         This method only configures the direction at the FPGA. When using
@@ -150,7 +158,7 @@ class TTLInOut:
         """Set the direction to input at the current position of the time
         cursor.
 
-        There must be a delay of at least one RTIO clock cycle before any
+        A delay of at least one RTIO clock cycle is necessary before any
         other command can be issued.
 
         This method only configures the direction at the FPGA. When using
@@ -318,17 +326,18 @@ class TTLInOut:
         :return: The number of events before the timeout elapsed (0 if none
             observed).
 
-        Examples:
+        **Examples:**
+
             To count events on channel ``ttl_input``, up to the current timeline
-            position::
+            position: ::
 
                 ttl_input.count(now_mu())
 
             If other events are scheduled between the end of the input gate
-            period and when the number of events is counted, using ``now_mu()``
-            as timeout consumes an unnecessary amount of timeline slack. In
-            such cases, it can be beneficial to pass a more precise timestamp,
-            for example::
+            period and when the number of events is counted, using 
+            :meth:`~artiq.language.core.now_mu()` as timeout consumes an 
+            unnecessary amount of timeline slack. In such cases, it can be 
+            beneficial to pass a more precise timestamp, for example: ::
 
                 gate_end_mu = ttl_input.gate_rising(100 * us)
 
@@ -342,7 +351,7 @@ class TTLInOut:
                 num_rising_edges = ttl_input.count(gate_end_mu)
 
             The ``gate_*()`` family of methods return the cursor at the end
-            of the window, allowing this to be expressed in a compact fashion::
+            of the window, allowing this to be expressed in a compact fashion: ::
 
                 ttl_input.count(ttl_input.gate_rising(100 * us))
         """
@@ -433,7 +442,7 @@ class TTLInOut:
         was being watched.
 
         The time cursor is not modified by this function. This function
-        always makes the slack negative.
+        always results in negative slack.
         """
         rtio_output(self.target_sens, 0)
         success = True
@@ -464,6 +473,10 @@ class TTLClockGen:
         self.target = channel << 8
 
         self.acc_width = numpy.int64(acc_width)
+
+    @staticmethod
+    def get_rtio_channels(channel, **kwargs):
+        return [(channel, None)]
 
     @portable
     def frequency_to_ftw(self, frequency):

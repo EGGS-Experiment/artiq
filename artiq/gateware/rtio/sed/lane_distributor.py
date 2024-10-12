@@ -10,7 +10,7 @@ __all__ = ["LaneDistributor"]
 class LaneDistributor(Module):
     def __init__(self, lane_count, seqn_width, layout_payload,
                  compensation, glbl_fine_ts_width,
-                 enable_spread=True, quash_channels=[], interface=None):
+                 quash_channels=[], interface=None):
         if lane_count & (lane_count - 1):
             raise NotImplementedError("lane count must be a power of 2")
 
@@ -27,6 +27,8 @@ class LaneDistributor(Module):
         self.minimum_coarse_timestamp = Signal(us_timestamp_width)
         self.output = [Record(layouts.fifo_ingress(seqn_width, layout_payload))
                        for _ in range(lane_count)]
+
+        self.enable_spread = Signal()
 
         # # #
 
@@ -154,8 +156,10 @@ class LaneDistributor(Module):
             self.comb += lio.payload.timestamp.eq(compensated_timestamp)
 
         # cycle #3, read status
+        current_lane_high_watermark = Signal()
         current_lane_writable = Signal()
         self.comb += [
+            current_lane_high_watermark.eq(Array(lio.high_watermark for lio in self.output)[current_lane]),
             current_lane_writable.eq(Array(lio.writable for lio in self.output)[current_lane]),
             o_status_wait.eq(~current_lane_writable)
         ]
@@ -170,15 +174,12 @@ class LaneDistributor(Module):
             self.sequence_error_channel.eq(self.cri.chan_sel[:16])
         ]
 
-        # current lane has been full, spread events by switching to the next.
-        if enable_spread:
-            current_lane_writable_r = Signal(reset=1)
-            self.sync += [
-                current_lane_writable_r.eq(current_lane_writable),
-                If(~current_lane_writable_r & current_lane_writable,
-                    force_laneB.eq(1)
-                ),
-                If(do_write,
-                    force_laneB.eq(0)
-                )
-            ]
+        # current lane has reached high watermark, spread events by switching to the next.
+        self.sync += [
+            If(self.enable_spread & (current_lane_high_watermark | ~current_lane_writable),
+                force_laneB.eq(1)
+            ),
+            If(do_write,
+                force_laneB.eq(0)
+            )
+        ]

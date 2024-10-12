@@ -9,11 +9,11 @@ class TestFrontends(unittest.TestCase):
         """Test --help as a simple smoke test against catastrophic breakage."""
         commands = {
             "aqctl": [
-                "corelog", "moninj_proxy"
+                "corelog", "moninj_proxy", "coreanalyzer_proxy"
             ],
             "artiq": [
                 "client", "compile", "coreanalyzer", "coremgmt",
-                "flash", "master", "mkfs", "route",
+                "flash", "master", "mkfs", "route", "rtiomap",
                 "rtiomon", "run", "session", "browser", "dashboard"
             ]
         }

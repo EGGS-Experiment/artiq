@@ -68,6 +68,7 @@ def do_dma(dut, address):
 test_writes1 = [
     (0x01, 0x23, 0x12, 0x33),
     (0x901, 0x902, 0x11, 0xeeeeeeeeeeeeeefffffffffffffffffffffffffffffff28888177772736646717738388488),
+    (0x82, 0x289, 0x99, int.from_bytes(b"\xf0" * 64, "little")),
     (0x81, 0x288, 0x88, 0x8888)
 ]
 
@@ -128,7 +129,7 @@ class FullStackTB(Module):
         self.submodules.memory = wishbone.SRAM(
             256, init=sequence, bus=bus)
         self.submodules.dut = dma.DMA(bus, dw)
-        self.submodules.tsc = rtio.TSC("async")
+        self.submodules.tsc = rtio.TSC()
         self.submodules.rtio = rtio.Core(self.tsc, rtio_channels)
         self.comb += self.dut.cri.connect(self.rtio.cri)
 
@@ -203,11 +204,11 @@ class TestDMA(unittest.TestCase):
         run_simulation(tb[32], {"sys": [
             do_dma(tb[32].dut, 0), monitor(32),
             (None for _ in range(70)),
-        ]}, {"sys": 8, "rsys": 8, "rtio": 8, "rio": 8, "rio_phy": 8})
+        ]}, {"sys": 8, "rio": 8, "rio_phy": 8})
         run_simulation(tb[64], {"sys": [
             do_dma(tb[64].dut, 0), monitor(64),
             (None for _ in range(70)),
-        ]}, {"sys": 8, "rsys": 8, "rtio": 8, "rio": 8, "rio_phy": 8})
+        ]}, {"sys": 8, "rio": 8, "rio_phy": 8})
 
         correct_changes = [(timestamp + 11, channel)
                            for channel, timestamp, _, _ in test_writes_full_stack]

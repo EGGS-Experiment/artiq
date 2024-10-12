@@ -19,7 +19,8 @@
         },
         "min_artiq_version": {
             "type": "string",
-            "description": "Minimum required ARTIQ version"
+            "description": "Minimum required ARTIQ version",
+            "default": "0"
         },
         "hw_rev": {
             "type": "string",
@@ -27,8 +28,15 @@
         },
         "base": {
             "type": "string",
+            "enum": ["use_drtio_role", "standalone", "master", "satellite"],
+            "description": "Deprecated, use drtio_role instead",
+            "default": "use_drtio_role"
+        },
+        "drtio_role": {
+            "type": "string",
             "enum": ["standalone", "master", "satellite"],
-            "description": "SoC base; value depends on intended system topology"
+            "description": "Role that this device takes in a DRTIO network; 'standalone' means no DRTIO",
+            "default": "standalone"
         },
         "ext_ref_frequency": {
             "type": "number",
@@ -40,6 +48,10 @@
             "exclusiveMinimum": 0,
             "default": 125e6,
             "description": "RTIO frequency"
+        },
+        "enable_wrpll": {
+            "type": "boolean",
+            "default": false
         },
         "core_addr": {
             "type": "string",
@@ -122,7 +134,7 @@
                 },
                 "hw_rev": {
                     "type": "string",
-                    "enum": ["v1.0"]
+                    "enum": ["v1.0", "v1.1"]
                 }
             }
         }
@@ -134,7 +146,7 @@
             "properties": {
                 "type": {
                     "type": "string",
-                    "enum": ["dio", "dio_spi", "urukul", "novogorny", "sampler", "suservo", "zotino", "grabber", "mirny", "fastino", "phaser", "hvamp"]
+                    "enum": ["dio", "dio_spi", "urukul", "novogorny", "sampler", "suservo", "zotino", "grabber", "mirny", "fastino", "phaser", "hvamp", "shuttler"]
                 },
                 "board": {
                     "type": "string"
@@ -204,7 +216,8 @@
                                 "type": "object",
                                 "properties": {
                                     "name": {
-                                        "type": "string"
+                                        "type": "string",
+                                        "default": "dio_spi"
                                     },
                                     "clk": {
                                         "type": "integer",
@@ -240,7 +253,8 @@
                                 "type": "object",
                                 "properties": {
                                     "name": {
-                                        "type": "string"
+                                        "type": "string",
+                                        "default": "ttl"
                                     },
                                     "pin": {
                                         "type": "integer",
@@ -257,7 +271,8 @@
                                     }
                                 },
                                 "required": ["pin", "direction"]
-                            }
+                            },
+                            "default": []
                         }
                     },
                     "required": ["ports", "spi"]
@@ -301,6 +316,12 @@
                         },
                         "pll_n": {
                             "type": "integer"
+                        },
+                        "pll_en": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "default": 1
                         },
                         "pll_vco": {
                             "type": "integer"
@@ -376,6 +397,11 @@
                             "minItems": 2,
                             "maxItems": 2
                         },
+                        "sampler_hw_rev": {
+                            "type": "string",
+                            "pattern": "^v[0-9]+\\.[0-9]+",
+                            "default": "v2.2"
+                        },
                         "urukul0_ports": {
                             "type": "array",
                             "items": {
@@ -404,6 +430,12 @@
                         "pll_n": {
                             "type": "integer",
                             "default": 32
+                        },
+                        "pll_en": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 1,
+                            "default": 1
                         },
                         "pll_vco": {
                             "type": "integer"
@@ -496,6 +528,11 @@
                         "almazny": {
                             "type": "boolean",
                             "default": false
+                        },
+                        "almazny_hw_rev": {
+                            "type": "string",
+                            "pattern": "^v[0-9]+\\.[0-9]+",
+                            "default": "v1.2"
                         }
                     },
                     "required": ["ports"]
@@ -545,6 +582,11 @@
                             },
                             "minItems": 1,
                             "maxItems": 1
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["base", "miqro"],
+                            "default": "base"
                         }
                     },
                     "required": ["ports"]
@@ -567,6 +609,35 @@
                             },
                             "minItems": 1,
                             "maxItems": 1
+                        }
+                    },
+                    "required": ["ports"]
+                }
+            },{
+                "title": "Shuttler",
+                "if": {
+                    "properties": {
+                        "type": {
+                            "const": "shuttler"
+                        }
+                    }
+                },
+                "then": {
+                    "properties": {
+                        "ports": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            },
+                            "minItems": 1,
+                            "maxItems": 2
+                        },
+                        "drtio_destination": {
+                            "type": "integer"
+                        },
+                        "hw_rev": {
+                            "type": "string",
+                            "enum": ["v1.0", "v1.1"]
                         }
                     },
                     "required": ["ports"]

@@ -31,7 +31,7 @@ def peripheral_dio_spi(module, peripheral, **kwargs):
            for s in peripheral["spi"]]
     ttl = [(t["pin"], ttl_classes[t["direction"]],
             edge_counter.SimpleEdgeCounter if t.get("edge_counter") else None)
-           for t in peripheral.get("ttl", [])]
+           for t in peripheral["ttl"]]
     eem.DIO_SPI.add_std(module, peripheral["ports"][0], spi, ttl, **kwargs)
 
 
@@ -123,15 +123,25 @@ def peripheral_fastino(module, peripheral, **kwargs):
 def peripheral_phaser(module, peripheral, **kwargs):
     if len(peripheral["ports"]) != 1:
         raise ValueError("wrong number of ports")
-    eem.Phaser.add_std(module, peripheral["ports"][0], **kwargs)
+    eem.Phaser.add_std(module, peripheral["ports"][0],
+        peripheral["mode"], **kwargs)
 
 
 def peripheral_hvamp(module, peripheral, **kwargs):
     if len(peripheral["ports"]) != 1:
         raise ValueError("wrong number of ports")
-    eem.HVAmp.add_std(module, peripheral["ports"][0], 
+    eem.HVAmp.add_std(module, peripheral["ports"][0],
         ttl_simple.Output, **kwargs)
 
+def peripheral_shuttler(module, peripheral, **kwargs):
+    if len(peripheral["ports"]) == 1:
+        port = peripheral["ports"][0]
+        port_aux = None
+    elif len(peripheral["ports"]) == 2:
+        port, port_aux = peripheral["ports"]
+    else:
+        raise ValueError("wrong number of ports")
+    eem.Shuttler.add_std(module, port, port_aux, **kwargs)
 
 peripheral_processors = {
     "dio": peripheral_dio,
@@ -146,6 +156,7 @@ peripheral_processors = {
     "fastino": peripheral_fastino,
     "phaser": peripheral_phaser,
     "hvamp": peripheral_hvamp,
+    "shuttler": peripheral_shuttler,
 }
 
 

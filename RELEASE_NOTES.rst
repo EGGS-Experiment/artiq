@@ -3,6 +3,114 @@
 Release notes
 =============
 
+ARTIQ-8
+-------
+
+Highlights:
+
+* New hardware support:
+   - Support for Shuttler, a 16-channel 125MSPS DAC card intended for ion transport.
+     Waveform generator and user API are similar to the NIST PDQ.
+   - Implemented Phaser-servo. This requires recent gateware on Phaser.
+   - Almazny v1.2 with finer RF switch control.
+   - Metlino and Sayma support has been dropped due to complications with synchronous RTIO clocking.
+   - More user LEDs are exposed to RTIO on Kasli.
+   - Implemented Phaser-MIQRO support. This requires the proprietary Phaser MIQRO gateware
+     variant from QUARTIQ.
+   - Sampler: fixed ADC MU to Volt conversion factor for Sampler v2.2+.
+     For earlier hardware versions, specify the hardware version in the device
+     database file (e.g. ``"hw_rev": "v2.1"``) to use the correct conversion factor.
+* Support for distributed DMA, where DMA is run directly on satellites for corresponding
+  RTIO events, increasing bandwidth in scenarios with heavy satellite usage.
+* Support for subkernels, where kernels are run on satellite device CPUs to offload some
+  of the processing and RTIO operations.
+* CPU (on softcore platforms) and AXI bus (on Zynq) are now clocked synchronously with the RTIO
+  clock, to facilitate implementation of local processing on DRTIO satellites, and to slightly
+  reduce RTIO latency.
+* Support for DRTIO-over-EEM, used with Shuttler.
+* Support for WRPLL low-noise clock recovery.
+* Enabled event spreading on DRTIO satellites, using high watermark for lane switching.
+* Added channel names to RTIO error messages.
+* The RTIO analyzer is now proxied by ``aqctl_coreanalyzer_proxy`` typically running on the master
+  machine, similarly to ``aqctl_moninj_proxy``.
+* GUI:
+   - Integrated waveform analyzer, removing the need for external VCD viewers such as GtkWave.
+   - Implemented Applet Request Interfaces which allow applets to modify datasets and set the
+     current values of widgets in the dashboard's experiment windows.
+   - Implemented a new ``EntryArea`` widget which allows argument entry widgets to be used in applets.
+   - The "Close all applets" command (shortcut: Ctrl-Alt-W) now ignores docked applets,
+     making it a convenient way to clean up after exploratory work without destroying a
+     carefully arranged default workspace.
+   - Hotkeys now organize experiment windows in the order they were last interacted with:
+      + CTRL+SHIFT+T tiles experiment windows
+      + CTRL+SHIFT+C cascades experiment windows
+   - By enabling the ``quickstyle`` option, ``EnumerationValue`` entry widgets can now alternatively display 
+     its choices as buttons that submit the experiment on click.
+* Datasets can now be associated with units and scale factors, and displayed accordingly in the dashboard
+  including applets, like widgets such as ``NumberValue`` already did in earlier ARTIQ versions.
+* Experiments can now request arguments interactively from the user at any time.
+* Persistent datasets are now stored in a LMDB database for improved performance.
+* Python's built-in types (such as ``float``, or ``List[...]``) can now be used in type annotations on
+  kernel functions.
+* MSYS2 packaging for Windows, which replaces Conda. Conda packages are still available to
+  support legacy installations, but may be removed in a future release.
+* Experiments can now be submitted with revisions set to a branch / tag name instead of only git hashes.
+* Grabber image input now has an optional timeout.
+* On NAR3-supported devices (Kasli-SoC, ZC706), when a Rust panic occurs, a minimal environment is started
+  where the network and ``artiq_coremgmt`` can be used. This allows the user to inspect logs, change
+  configuration options, update the firmware, and reboot the device.
+* Full Python 3.11 support.
+
+Breaking changes:
+
+* ``SimpleApplet`` now calls widget constructors with an additional ``ctl`` parameter for control
+  operations, which includes dataset operations. It can be ignored if not needed. For an example usage,
+  refer to the ``big_number.py`` applet.
+* ``SimpleApplet`` and ``TitleApplet`` now call ``data_changed`` with additional parameters. Derived applets
+  should change the function signature as below:
+
+::
+
+  # SimpleApplet
+  def data_changed(self, value, metadata, persist, mods)
+  # SimpleApplet (old version)
+  def data_changed(self, data, mods)
+  # TitleApplet
+  def data_changed(self, value, metadata, persist, mods, title)
+  # TitleApplet (old version)
+  def data_changed(self, data, mods, title)
+
+Accesses to the data argument should be replaced as below:
+
+::
+
+  data[key][0] ==> persist[key]
+  data[key][1] ==> value[key]
+
+* The ``ndecimals`` parameter in ``NumberValue`` and ``Scannable`` has been renamed to ``precision``. 
+  Parameters after and including ``scale`` in both constructors are now keyword-only.
+  Refer to the updated ``no_hardware/arguments_demo.py`` example for current usage.
+* Almazny v1.2 is incompatible with the legacy versions and is the default.
+  To use legacy versions, specify ``almazny_hw_rev`` in the JSON description.
+* kasli_generic.py has been merged into kasli.py, and the demonstration designs without JSON descriptions
+  have been removed. The base classes remain present in kasli.py to support third-party flows without
+  JSON descriptions.
+* Legacy PYON databases should be converted to LMDB with the script below:
+
+::
+
+  from sipyco import pyon
+  import lmdb
+
+  old = pyon.load_file("dataset_db.pyon")
+  new = lmdb.open("dataset_db.mdb", subdir=False, map_size=2**30)
+  with new.begin(write=True) as txn:
+    for key, value in old.items():
+      txn.put(key.encode(), pyon.encode((value, {})).encode())
+  new.close()
+
+* ``artiq.wavesynth`` has been removed.
+
 ARTIQ-7
 -------
 
@@ -17,7 +125,7 @@ Highlights:
    - Almazny mezzanine board for Mirny
    - Phaser: improved documentation, exposed the DAC coarse mixer and ``sif_sync``, exposed upconverter calibration
      and enabling/disabling of upconverter LO & RF outputs, added helpers to align Phaser updates to the
-     RTIO timeline (``get_next_frame_mu()``
+     RTIO timeline (``get_next_frame_mu()``).
    - Urukul: ``get()``, ``get_mu()``, ``get_att()``, and ``get_att_mu()`` functions added for AD9910 and AD9912.
 * Softcore targets now use the RISC-V architecture (VexRiscv) instead of OR1K (mor1kx).
 * Gateware FPU is supported on KC705 and Kasli 2.0.
@@ -67,9 +175,9 @@ Breaking changes:
   generated for some configurations.
 * Phaser: fixed coarse mixer frequency configuration
 * Mirny: Added extra delays in ``ADF5356.sync()``. This avoids the need of an extra delay before
-  calling `ADF5356.init()`.
+  calling ``ADF5356.init()``.
 * The deprecated ``set_dataset(..., save=...)`` is no longer supported.
-* The ``PCA9548`` I2C switch class was renamed to ``I2CSwitch``, to accomodate support for PCA9547,
+* The ``PCA9548`` I2C switch class was renamed to ``I2CSwitch``, to accommodate support for PCA9547,
   and possibly other switches in future. Readback has been removed, and now only one channel per
   switch is supported.
 

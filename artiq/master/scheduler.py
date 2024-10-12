@@ -132,15 +132,23 @@ class RunPool:
             writer.writerow([rid, start_time, expid["file"]])
 
     def submit(self, expid, priority, due_date, flush, pipeline_name):
+        """
+        Submits an experiment to be run by this pool
+
+        If expid has the attribute `repo_rev`, treat it as a git revision or
+        reference and resolve into a unique git hash before submission
+        """
         # mutates expid to insert head repository revision if None and
         # replaces relative path with the absolute one.
         # called through scheduler.
         rid = self.ridc.get()
         if "repo_rev" in expid:
-            if expid["repo_rev"] is None:
-                expid["repo_rev"] = self.experiment_db.cur_rev
-            wd, repo_msg = self.experiment_db.repo_backend.request_rev(
-                expid["repo_rev"])
+            repo_rev_or_ref = expid["repo_rev"] or self.experiment_db.cur_rev
+            wd, repo_msg, repo_rev = self.experiment_db.repo_backend.request_rev(repo_rev_or_ref)
+
+            # Mutate expid's repo_rev to that returned from request_rev, in case
+            # a branch was passed instead of a hash
+            expid["repo_rev"] = repo_rev
         else:
             if "file" in expid:
                 expid["file"] = os.path.abspath(expid["file"])
@@ -148,7 +156,7 @@ class RunPool:
 
         run = Run(rid, pipeline_name, wd, expid, priority, due_date, flush,
                   self, repo_msg=repo_msg)
-        if self.log_submissions is not None:          
+        if self.log_submissions is not None:
             self.log_submission(rid, expid)
         self.runs[rid] = run
         self.state_changed.notify()
@@ -231,7 +239,7 @@ class PrepareStage(TaskObject):
                 try:
                     await run.build()
                     await run.prepare()
-                except:
+                except Exception:
                     logger.error("got worker exception in prepare stage, "
                                  "deleting RID %d", run.rid)
                     log_worker_exception()
@@ -281,7 +289,7 @@ class RunStage(TaskObject):
                 else:
                     run.status = RunStatus.running
                     completed = await run.run()
-            except:
+            except Exception:
                 logger.error("got worker exception in run stage, "
                              "deleting RID %d", run.rid)
                 log_worker_exception()
@@ -318,7 +326,7 @@ class AnalyzeStage(TaskObject):
             run.status = RunStatus.analyzing
             try:
                 await run.analyze()
-            except:
+            except Exception:
                 logger.error("got worker exception in analyze stage of RID %d.",
                              run.rid)
                 log_worker_exception()
@@ -332,10 +340,10 @@ class Pipeline:
         self._run = RunStage(self.pool, deleter.delete)
         self._analyze = AnalyzeStage(self.pool, deleter.delete)
 
-    def start(self):
-        self._prepare.start()
-        self._run.start()
-        self._analyze.start()
+    def start(self, *, loop=None):
+        self._prepare.start(loop=loop)
+        self._run.start(loop=loop)
+        self._analyze.start(loop=loop)
 
     async def stop(self):
         # NB: restart of a stopped pipeline is not supported
@@ -410,8 +418,9 @@ class Scheduler:
         self._deleter = Deleter(self._pipelines)
         self._log_submissions = log_submissions
 
-    def start(self):
-        self._deleter.start()
+    def start(self, *, loop=None):
+        self._loop = loop
+        self._deleter.start(loop=self._loop)
 
     async def stop(self):
         # NB: restart of a stopped scheduler is not supported
@@ -442,7 +451,7 @@ class Scheduler:
                                 self._worker_handlers, self.notifier,
                                 self._experiment_db, self._log_submissions)
             self._pipelines[pipeline_name] = pipeline
-            pipeline.start()
+            pipeline.start(loop=self._loop)
         return pipeline.pool.submit(expid, priority, due_date, flush, pipeline_name)
 
     def delete(self, rid):
@@ -468,16 +477,16 @@ class Scheduler:
         return self.notifier.raw_view
 
     def check_pause(self, rid):
-        """Returns ``True`` if there is a condition that could make ``pause``
+        """Returns ``True`` if there is a condition that could make :meth:`pause`
         not return immediately (termination requested or higher priority run).
 
         The typical purpose of this function is to check from a kernel
         whether returning control to the host and pausing would have an effect,
         in order to avoid the cost of switching kernels in the common case
-        where ``pause`` does nothing.
+        where :meth:`pause` does nothing.
 
         This function does not have side effects, and does not have to be
-        followed by a call to ``pause``.
+        followed by a call to :meth:`pause`.
         """
         for pipeline in self._pipelines.values():
             if rid in pipeline.pool.runs:
@@ -501,8 +510,7 @@ class Scheduler:
         """Returns ``True`` if termination is requested."""
         for pipeline in self._pipelines.values():
             if rid in pipeline.pool.runs:
-                run = pipeline.pool.runs[rid]  
+                run = pipeline.pool.runs[rid]
                 if run.termination_requested:
                     return True
         return False
-        

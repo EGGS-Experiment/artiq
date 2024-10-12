@@ -1,4 +1,4 @@
-"""RTIO driver for Mirny (4 channel GHz PLLs)
+"""RTIO driver for Mirny (4-channel GHz PLLs)
 """
 
 from artiq.language.core import kernel, delay, portable
@@ -30,16 +30,6 @@ WE = 1 << 24
 
 # supported CPLD code version
 PROTO_REV_MATCH = 0x0
-
-# almazny-specific data
-ALMAZNY_REG_BASE = 0x0C
-ALMAZNY_OE_SHIFT = 12
-
-# higher SPI write divider to match almazny shift register timing 
-# min SER time before SRCLK rise = 125ns
-# -> div=32 gives 125ns for data before clock rise
-# works at faster dividers too but could be less reliable
-ALMAZNY_SPIT_WR = 32
 
 
 class Mirny:
@@ -92,7 +82,7 @@ class Mirny:
 
     @kernel
     def read_reg(self, addr):
-        """Read a register"""
+        """Read a register."""
         self.bus.set_config_mu(
             SPI_CONFIG | spi.SPI_INPUT | spi.SPI_END, 24, SPIT_RD, SPI_CS
         )
@@ -101,7 +91,7 @@ class Mirny:
 
     @kernel
     def write_reg(self, addr, data):
-        """Write a register"""
+        """Write a register."""
         self.bus.set_config_mu(SPI_CONFIG | spi.SPI_END, 24, SPIT_WR, SPI_CS)
         self.bus.write((addr << 25) | WE | ((data & 0xFFFF) << 8))
 
@@ -111,9 +101,9 @@ class Mirny:
         Initialize and detect Mirny.
 
         Select the clock source based the board's hardware revision.
-        Raise ValueError if the board's hardware revision is not supported.
+        Raise :exc:`ValueError` if the board's hardware revision is not supported.
 
-        :param blind: Verify presence and protocol compatibility. Raise ValueError on failure.
+        :param blind: Verify presence and protocol compatibility. Raise :exc:`ValueError` on failure.
         """
         reg0 = self.read_reg(0)
         self.hw_rev = reg0 & 0x3
@@ -148,7 +138,7 @@ class Mirny:
     def set_att_mu(self, channel, att):
         """Set digital step attenuator in machine units.
 
-        :param att: Attenuation setting, 8 bit digital.
+        :param att: Attenuation setting, 8-bit digital.
         """
         self.bus.set_config_mu(SPI_CONFIG | spi.SPI_END, 16, SPIT_WR, SPI_CS)
         self.bus.write(((channel | 8) << 25) | (att << 16))
@@ -159,7 +149,7 @@ class Mirny:
 
         This method will write the attenuator settings of the selected channel.
 
-        .. seealso:: :meth:`set_att_mu`
+        See also :meth:`Mirny.set_att_mu`.
 
         :param channel: Attenuator channel (0-3).
         :param att: Attenuation setting in dB. Higher value is more
@@ -170,113 +160,10 @@ class Mirny:
 
     @kernel
     def write_ext(self, addr, length, data, ext_div=SPIT_WR):
-        """Perform SPI write to a prefixed address"""
+        """Perform SPI write to a prefixed address."""
         self.bus.set_config_mu(SPI_CONFIG, 8, SPIT_WR, SPI_CS)
         self.bus.write(addr << 25)
         self.bus.set_config_mu(SPI_CONFIG | spi.SPI_END, length, ext_div, SPI_CS)
         if length < 32:
             data <<= 32 - length
         self.bus.write(data)
-
-
-class Almazny:
-    """
-    Almazny (High frequency mezzanine board for Mirny)
-
-    :param host_mirny - Mirny device Almazny is connected to
-    """
-
-    def __init__(self, dmgr, host_mirny):
-        self.mirny_cpld = dmgr.get(host_mirny)
-        self.att_mu = [0x3f] * 4
-        self.channel_sw = [0] * 4
-        self.output_enable = False
-
-    @kernel
-    def init(self):
-        self.output_toggle(self.output_enable)
-
-    @kernel
-    def att_to_mu(self, att):
-        """
-        Convert an attenuator setting in dB to machine units.
-
-        :param att: attenuator setting in dB [0-31.5]
-        :return: attenuator setting in machine units
-        """
-        mu = round(att * 2.0)
-        if mu > 63 or mu < 0:
-            raise ValueError("Invalid Almazny attenuator settings!")
-        return mu
-
-    @kernel
-    def mu_to_att(self, att_mu):
-        """
-        Convert a digital attenuator setting to dB.
-
-        :param att_mu: attenuator setting in machine units
-        :return: attenuator setting in dB
-        """
-        return att_mu / 2
-
-    @kernel
-    def set_att(self, channel, att, rf_switch=True):
-        """
-        Sets attenuators on chosen shift register (channel).
-        :param channel - index of the register [0-3]
-        :param att_mu - attenuation setting in dBm [0-31.5]
-        :param rf_switch - rf switch (bool)
-        """
-        self.set_att_mu(channel, self.att_to_mu(att), rf_switch)
-
-    @kernel
-    def set_att_mu(self, channel, att_mu, rf_switch=True):
-        """
-        Sets attenuators on chosen shift register (channel).
-        :param channel - index of the register [0-3]
-        :param att_mu - attenuation setting in machine units [0-63]
-        :param rf_switch - rf switch (bool)
-        """
-        self.channel_sw[channel] = 1 if rf_switch else 0
-        self.att_mu[channel] = att_mu
-        self._update_register(channel)
-
-    @kernel
-    def output_toggle(self, oe):
-        """
-        Toggles output on all shift registers on or off.
-        :param oe - toggle output enable (bool)
-        """
-        self.output_enable = oe
-        cfg_reg = self.mirny_cpld.read_reg(1)
-        en = 1 if self.output_enable else 0
-        delay(100 * us)
-        new_reg = (en << ALMAZNY_OE_SHIFT) | (cfg_reg & 0x3FF)
-        self.mirny_cpld.write_reg(1, new_reg)
-        delay(100 * us)
-
-    @kernel
-    def _flip_mu_bits(self, mu):
-        # in this form MSB is actually 0.5dB attenuator
-        # unnatural for users, so we flip the six bits
-        return (((mu & 0x01) << 5)
-                | ((mu & 0x02) << 3) 
-                | ((mu & 0x04) << 1) 
-                | ((mu & 0x08) >> 1) 
-                | ((mu & 0x10) >> 3) 
-                | ((mu & 0x20) >> 5))
-
-    @kernel
-    def _update_register(self, ch):
-        self.mirny_cpld.write_ext(
-            ALMAZNY_REG_BASE + ch, 
-            8, 
-            self._flip_mu_bits(self.att_mu[ch]) | (self.channel_sw[ch] << 6), 
-            ALMAZNY_SPIT_WR
-        )
-        delay(100 * us)
-
-    @kernel
-    def _update_all_registers(self):
-        for i in range(4):
-            self._update_register(i)

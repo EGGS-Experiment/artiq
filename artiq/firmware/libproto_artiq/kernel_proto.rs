@@ -5,7 +5,19 @@ use dyld;
 pub const KERNELCPU_EXEC_ADDRESS:    usize = 0x45000000;
 pub const KERNELCPU_PAYLOAD_ADDRESS: usize = 0x45060000;
 pub const KERNELCPU_LAST_ADDRESS:    usize = 0x4fffffff;
-pub const KSUPPORT_HEADER_SIZE:      usize = 0x80;
+
+// Must match the offset of the first (starting at KERNELCPU_EXEC_ADDRESS)
+// section in ksupport.elf.
+pub const KSUPPORT_HEADER_SIZE: usize = 0x74;
+
+#[derive(Debug)]
+pub enum SubkernelStatus<'a> {
+    Timeout,
+    IncorrectState,
+    CommLost,
+    Exception(eh::eh_artiq::Exception<'a>),
+    OtherError,
+}
 
 #[derive(Debug)]
 pub enum Message<'a> {
@@ -20,7 +32,8 @@ pub enum Message<'a> {
     DmaRecordStart(&'a str),
     DmaRecordAppend(&'a [u8]),
     DmaRecordStop {
-        duration:  u64
+        duration:  u64,
+        enable_ddma: bool
     },
 
     DmaEraseRequest {
@@ -32,8 +45,24 @@ pub enum Message<'a> {
     },
     DmaRetrieveReply {
         trace:    Option<&'a [u8]>,
-        duration: u64
+        duration: u64,
+        uses_ddma: bool,
     },
+
+    DmaStartRemoteRequest {
+        id: i32,
+        timestamp: i64,
+    },
+    DmaAwaitRemoteRequest {
+        id: i32
+    },
+    DmaAwaitRemoteReply {
+        timeout: bool,
+        error: u8,
+        channel: u32,
+        timestamp: u64
+    },
+
 
     RunFinished,
     RunException {
@@ -73,6 +102,15 @@ pub enum Message<'a> {
     SpiReadRequest { busno: u32 },
     SpiReadReply { succeeded: bool, data: u32 },
     SpiBasicReply { succeeded: bool },
+
+    SubkernelLoadRunRequest { id: u32, destination: u8, run: bool },
+    SubkernelLoadRunReply { succeeded: bool },
+    SubkernelAwaitFinishRequest { id: u32, timeout: i64 },
+    SubkernelAwaitFinishReply,
+    SubkernelMsgSend { id: u32, destination: Option<u8>, count: u8, tag: &'a [u8], data: *const *const () },
+    SubkernelMsgRecvRequest { id: i32, timeout: i64, tags: &'a [u8] },
+    SubkernelMsgRecvReply { count: u8 },
+    SubkernelError(SubkernelStatus<'a>),
 
     Log(fmt::Arguments<'a>),
     LogSlice(&'a str)

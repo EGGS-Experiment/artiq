@@ -10,8 +10,6 @@ LDFLAGS += \
 
 RUSTFLAGS += -Cpanic=unwind
 
-export XBUILD_SYSROOT_PATH=$(BUILDINC_DIRECTORY)/../sysroot
-
 all:: runtime.bin runtime.fbi
 
 .PHONY: $(RUSTOUT)/libruntime.a
@@ -21,8 +19,8 @@ $(RUSTOUT)/libruntime.a:
 	--target $(RUNTIME_DIRECTORY)/../$(CARGO_TRIPLE).json
 
 runtime.elf: $(RUSTOUT)/libruntime.a ksupport_data.o
-	$(link) -T $(RUNTIME_DIRECTORY)/runtime.ld \
-		-lunwind-bare -m elf32lriscv
+	$(link) -T $(RUNTIME_DIRECTORY)/../firmware.ld \
+		-lunwind-vexriscv-bare -m elf32lriscv
 
 ksupport_data.o: ../ksupport/ksupport.elf
 	$(LD) -r -m elf32lriscv -b binary -o $@ $<

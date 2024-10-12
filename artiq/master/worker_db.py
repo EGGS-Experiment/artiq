@@ -19,12 +19,13 @@ class DummyDevice:
     pass
 
 
-def _create_device(desc, device_mgr):
+def _create_device(desc, device_mgr, argument_overrides):
     ty = desc["type"]
     if ty == "local":
         module = importlib.import_module(desc["module"])
         device_class = getattr(module, desc["class"])
-        return device_class(device_mgr, **desc.get("arguments", {}))
+        arguments = desc.get("arguments", {}) | argument_overrides
+        return device_class(device_mgr, **arguments)
     elif ty == "controller":
         if desc.get("best_effort", False):
             cls = BestEffortClient
@@ -60,6 +61,7 @@ class DeviceManager:
         self.ddb = ddb
         self.virtual_devices = virtual_devices
         self.active_devices = []
+        self.devarg_override = {}
 
     def get_device_db(self):
         """Returns the full contents of the device database."""
@@ -85,12 +87,19 @@ class DeviceManager:
                 return existing_dev
 
         try:
-            dev = _create_device(desc, self)
+            dev = _create_device(desc, self, self.devarg_override.get(name, {}))
         except Exception as e:
             raise DeviceError("Failed to create device '{}'"
                               .format(name)) from e
         self.active_devices.append((desc, dev))
         return dev
+
+    def notify_run_end(self):
+        """Sends a "end of Experiment run stage" notification to
+        all active devices."""
+        for _desc, dev in self.active_devices:
+            if hasattr(dev, "notify_run_end"):
+                dev.notify_run_end()
 
     def close_devices(self):
         """Closes all active devices, in the opposite order as they were
@@ -101,8 +110,9 @@ class DeviceManager:
                     dev.close_rpc()
                 elif hasattr(dev, "close"):
                     dev.close()
-            except Exception as e:
-                logger.warning("Exception %r when closing device %r", e, dev)
+            except:
+                logger.warning("Exception raised when closing device %r:",
+                               dev, exc_info=True)
         self.active_devices.clear()
 
 
@@ -111,16 +121,20 @@ class DatasetManager:
         self._broadcaster = Notifier(dict())
         self.local = dict()
         self.archive = dict()
+        self.metadata = dict()
 
         self.ddb = ddb
         self._broadcaster.publish = ddb.update
 
-    def set(self, key, value, broadcast=False, persist=False, archive=True):
+    def set(self, key, value, metadata, broadcast, persist, archive):
         if persist:
             broadcast = True
 
+        if not (broadcast or archive):
+            logger.warning(f"Dataset '{key}' will not be stored. Both 'broadcast' and 'archive' are set to False.")
+
         if broadcast:
-            self._broadcaster[key] = persist, value
+            self._broadcaster[key] = persist, value, metadata
         elif key in self._broadcaster.raw_view:
             del self._broadcaster[key]
 
@@ -128,6 +142,8 @@ class DatasetManager:
             self.local[key] = value
         elif key in self.local:
             del self.local[key]
+        
+        self.metadata[key] = metadata
 
     def _get_mutation_target(self, key):
         target = self.local.get(key, None)
@@ -163,21 +179,30 @@ class DatasetManager:
             self.archive[key] = data
         return data
 
+    def get_metadata(self, key):
+        if key in self.metadata:
+            return self.metadata[key]
+        return self.ddb.get_metadata(key)
+
     def write_hdf5(self, f):
         datasets_group = f.create_group("datasets")
         for k, v in self.local.items():
-            _write(datasets_group, k, v)
+            m = self.metadata.get(k, {})
+            _write(datasets_group, k, v, m)
 
         archive_group = f.create_group("archive")
         for k, v in self.archive.items():
-            _write(archive_group, k, v)
+            m = self.metadata.get(k, {})
+            _write(archive_group, k, v, m)
 
 
-def _write(group, k, v):
+def _write(group, k, v, m):
     # Add context to exception message when the user writes a dataset that is
     # not representable in HDF5.
     try:
         group[k] = v
+        for key, val in m.items():
+            group[k].attrs[key] = val
     except TypeError as e:
         raise TypeError("Error writing dataset '{}' of type '{}': {}".format(
             k, type(v), e))

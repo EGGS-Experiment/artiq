@@ -1,4 +1,4 @@
-#![feature(lang_items, never_type)]
+#![feature(asm, lang_items, never_type)]
 #![no_std]
 
 extern crate failure;
@@ -12,6 +12,8 @@ extern crate log;
 extern crate io;
 extern crate board_misoc;
 extern crate proto_artiq;
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 pub mod spi;
 
@@ -22,13 +24,8 @@ pub mod rpc_queue;
 
 #[cfg(has_si5324)]
 pub mod si5324;
-
-#[cfg(has_hmc830_7043)]
-pub mod hmc830_7043;
-#[cfg(has_ad9154)]
-mod ad9154_reg;
-#[cfg(has_ad9154)]
-pub mod ad9154;
+#[cfg(has_si549)]
+pub mod si549;
 
 #[cfg(has_grabber)]
 pub mod grabber;
@@ -36,3 +33,9 @@ pub mod grabber;
 #[cfg(has_drtio)]
 pub mod drtioaux;
 pub mod drtio_routing;
+
+#[cfg(all(has_drtio_eem, feature = "alloc"))]
+pub mod drtio_eem;
+
+#[cfg(soc_platform = "efc")]
+pub mod ad9117;
