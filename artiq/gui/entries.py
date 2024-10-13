@@ -40,10 +40,18 @@ class EntryTreeWidget(QtWidgets.QTreeWidget):
         self._arg_to_widgets = dict()
         self._arguments = dict()
 
+        ### tmp remove - darkmode
+        # sets the color gradient for argument boxes in the experiment widgets
+        # self.gradient = QtGui.QLinearGradient(
+        #     0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing() * 2.5)
+        # self.gradient.setColorAt(0, self.palette().base().color())
+        # self.gradient.setColorAt(1, self.palette().midlight().color())
         self.gradient = QtGui.QLinearGradient(
-            0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing() * 2.5)
-        self.gradient.setColorAt(0, self.palette().base().color())
-        self.gradient.setColorAt(1, self.palette().midlight().color())
+            0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing() * 2.5
+        )
+        self.gradient.setColorAt(0, self.palette().shadow().color())
+        self.gradient.setColorAt(1, QtGui.QColor(39, 39, 39))
+        ### tmp remove - darkmode
 
         self.bottom_item = QtWidgets.QTreeWidgetItem()
         self.addTopLevelItem(self.bottom_item)
@@ -537,7 +545,7 @@ class _LinearScan(LayoutWidget):
         scale = procdesc["scale"]
 
         def apply_properties(widget):
-            widget.setDecimals(procdesc["ndecimals"])
+            widget.setDecimals(procdesc["precision"])
             if procdesc["global_min"] is not None:
                 widget.setMinimum(procdesc["global_min"]/scale)
             else:
@@ -554,7 +562,7 @@ class _LinearScan(LayoutWidget):
         start = ScientificSpinBox()
         disable_scroll_wheel(start)
         apply_properties(start)
-        start.setPrecision()
+        start.setSigFigs()
         start.setRelativeStep()
         start.setValue(state["start"]/scale)
         self.addWidget(start, 0, 1)
@@ -563,7 +571,7 @@ class _LinearScan(LayoutWidget):
         stop = ScientificSpinBox()
         disable_scroll_wheel(stop)
         apply_properties(stop)
-        stop.setPrecision()
+        stop.setSigFigs()
         stop.setRelativeStep()
         stop.setMinimum(0)
         stop.setValue(state["stop"]/scale)
@@ -573,7 +581,7 @@ class _LinearScan(LayoutWidget):
         step = ScientificSpinBox()
         disable_scroll_wheel(step)
         apply_properties(step)
-        step.setPrecision()
+        step.setSigFigs()
         step.setRelativeStep()
         step.setMinimum(0)
         step.setValue(state["step"]/scale)

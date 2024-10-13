@@ -55,22 +55,6 @@ class _ArgumentEditor(EntryTreeWidget):
         if not arguments:
             self.insertTopLevelItem(0, QtWidgets.QTreeWidgetItem(["No arguments"]))
 
-        ### tmp remove - darkmode
-        gradient = QtGui.QLinearGradient(
-            0, 0, 0, QtGui.QFontMetrics(self.font()).lineSpacing()*2.5
-        )
-
-        # sets the color gradient for argument boxes in the experiment widgets
-        # gradient.setColorAt(0, self.palette().base().color())
-        # gradient.setColorAt(1, self.palette().midlight().color())
-
-        # gradient.setColorAt(0, self.palette().dark().color())
-        # gradient.setColorAt(1, self.palette().shadow().color())
-
-        gradient.setColorAt(0, self.palette().shadow().color())
-        gradient.setColorAt(1, QtGui.QColor(39, 39, 39))
-        ### tmp remove - darkmode
-
         for name, argument in arguments.items():
             self.set_argument(name, argument)
 
