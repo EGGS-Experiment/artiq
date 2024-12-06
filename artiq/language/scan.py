@@ -154,10 +154,9 @@ class LinearScan(ScanObject):
             n = 1 + int((stop - start) / (step))
             self.sequence = [start + i * step for i in range(n)]
 
-
         if randomize:
             rng = random.Random(seed)
-            random.shuffle(self.sequence, rng.random)
+            rng.shuffle(self.sequence)
 
     def __iter__(self):
         return iter(self.sequence)
@@ -216,7 +215,7 @@ class MultiScan(ScanObject):
             for subscannable in subscannable_list:
                 self.sequence.extend(subscannable)
             rng = random.Random(None)
-            random.shuffle(self.sequence, rng.random)
+            rng.shuffle(self.sequence)
 
         # interleave: interleave the subscannables sequentially
         # note: works for arbitrary number of subscannables
